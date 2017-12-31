@@ -15,8 +15,12 @@ from datasets import as_dataset
 from tf_models import as_model
 
 # Flags for defining the tf.train.ClusterSpec
-tf.app.flags.DEFINE_string('ps_hosts', '172.16.2.245:12345', 'Comma-separated list of hostname:port pairs')
-tf.app.flags.DEFINE_string('worker_hosts', '172.16.2.245:12346,172.16.2.245:12347',
+# tf.app.flags.DEFINE_string('ps_hosts', '172.16.2.245:12345', 'Comma-separated list of hostname:port pairs')
+# tf.app.flags.DEFINE_string('worker_hosts', '172.16.2.245:12346,172.16.2.245:12347',
+#                            'Comma-separated list of hostname:port pairs')
+
+tf.app.flags.DEFINE_string('ps_hosts', 'localhost:12345', 'Comma-separated list of hostname:port pairs')
+tf.app.flags.DEFINE_string('worker_hosts', 'localhost:12346,localhost:12347',
                            'Comma-separated list of hostname:port pairs')
 
 # Flags for defining the tf.train.Server
@@ -36,7 +40,7 @@ IMAGE_PIXELS = 28
 
 backend = 'tf'
 data_name = 'ipinyou'
-model_name = 'kpnn'
+model_name = 'pin'
 
 
 def create_done_queue(i):
@@ -104,12 +108,17 @@ def main(_):
             model = as_model(model_name,
                              input_dim=dataset.num_features,
                              num_fields=dataset.num_fields,
+                             sub_nn_layers=[
+                                 ('full', 5),
+                                 ('act', 'relu'),
+                                 ('drop', 0.9),
+                                 ('full', 1), ],
                              nn_layers=[
                                  ('full', 100),
                                  ('act', 'relu'),
                                  ('drop', 0.5),
-                                 ('full', 1),
-                             ])
+                                 ('full', 1), ],
+                             )
 
             global_step = tf.Variable(0, name='global_step', trainable=False)
 

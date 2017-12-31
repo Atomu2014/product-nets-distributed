@@ -171,6 +171,8 @@ class Model:
         self.embed_size = None
         self.nn_layers = None
         self.nn_input = None
+        self.sub_nn_layers = None
+        self.sub_nn_input = None
 
     def __str__(self):
         return self.__class__.__name__
@@ -258,37 +260,62 @@ class Model:
                         [0, 2, 1]),
                     xv_q),
                 -1)
-            # if add_bias:
-            #     bias = tf.Variable(get_init_value(init_type=0., shape=[num_pairs]), name='bias', dtype=dtype,
-            # collections=BIASES)
-            #     self.p += bias
-            # if reduce_sum:
-            #     self.p = tf.reduce_sum(self.p, 1)
 
     def def_nn_layers(self, nn_input_dim=None, dtype=tf.float32):
         assert hasattr(self, 'nn_input'), 'self.nn_input not found'
         assert hasattr(self, 'nn_layers'), 'self.nn_layers not found'
-        if nn_input_dim is None:
-            nn_input_dim = self.nn_input.get_shape().as_list()[-1]
-        self.h = self.nn_input
-        h_dim = nn_input_dim
-        for l_type, l_param in self.nn_layers:
-            assert l_type in {'full', 'act', 'drop'}, 'a layer should be {full, act, drop}'
-            if l_type == 'full':
-                with tf.name_scope('hidden') as scope:
-                    init_val = get_init_value(init_type=self.init_type, shape=[h_dim, l_param])
-                    wi = tf.Variable(init_val, name='w',
-                                     dtype=dtype, collections=WEIGHTS)
-                    bi = tf.Variable(get_init_value(init_type=0., shape=[l_param]), name='b', dtype=dtype,
-                                     collections=BIASES)
-                    self.h = tf.matmul(self.h, wi) + bi
-                    h_dim = l_param
-            elif l_type == 'act':
-                with tf.name_scope(scope):
-                    self.h = get_act_func(act_type=l_param)(self.h)
-            elif l_type == 'drop':
-                with tf.name_scope(scope):
-                    self.h = tf.nn.dropout(self.h, tf.where(self.training, l_param, 1.))
+        with tf.name_scope('network'):
+            if nn_input_dim is None:
+                nn_input_dim = self.nn_input.get_shape().as_list()[-1]
+            self.h = self.nn_input
+            h_dim = nn_input_dim
+            for l_type, l_param in self.nn_layers:
+                assert l_type in {'full', 'act', 'drop'}, 'a layer should be {full, act, drop}'
+                if l_type == 'full':
+                    with tf.name_scope('layer') as scope:
+                        wi = tf.Variable(get_init_value(init_type=self.init_type, shape=[h_dim, l_param]), name='w',
+                                         dtype=dtype, collections=WEIGHTS)
+                        bi = tf.Variable(get_init_value(init_type=0., shape=[l_param]), name='b', dtype=dtype,
+                                         collections=BIASES)
+                        self.h = tf.matmul(self.h, wi) + bi
+                        h_dim = l_param
+                elif l_type == 'act':
+                    with tf.name_scope(scope):
+                        self.h = get_act_func(act_type=l_param)(self.h)
+                elif l_type == 'drop':
+                    with tf.name_scope(scope):
+                        self.h = tf.nn.dropout(self.h, tf.where(self.training, l_param, 1.))
+
+    def def_sub_nn_layers(self, sub_nn_input_dim=None, sub_nn_num=None, dtype=tf.float32):
+        assert hasattr(self, 'sub_nn_input'), 'self.sub_nn_input not found'
+        assert hasattr(self, 'sub_nn_layers'), 'self.sub_nn_layers not found'
+        with tf.name_scope('sub_network'):
+            if sub_nn_input_dim is None:
+                sub_nn_input_dim = self.sub_nn_input.get_shape().as_list()[-1]
+            if sub_nn_num is None:
+                sub_nn_num = self.sub_nn_input.get_shape().as_list()[-2]
+            # batch * pair * 2k -> pair * batch * 2k
+            self.sh = tf.transpose(self.sub_nn_input, [1, 0, 2])
+            sh_dim = sub_nn_input_dim
+            sh_num = sub_nn_num
+            for sl_type, sl_param in self.sub_nn_layers:
+                assert sl_type in {'full', 'act', 'drop'}, 'a layer should be {full, act, drop}'
+                if sl_type == 'full':
+                    with tf.name_scope('layer') as scope:
+                        wi = tf.Variable(get_init_value(init_type=self.init_type, shape=[sh_num, sh_dim, sl_param]),
+                                         name='w', dtype=dtype, collections=WEIGHTS)
+                        bi = tf.Variable(get_init_value(init_type=0., shape=[sh_num, 1, sl_param]), name='b',
+                                         dtype=dtype, collections=BIASES)
+                        self.sh = tf.matmul(self.sh, wi) + bi
+                        sh_dim = sl_param
+                elif sl_type == 'act':
+                    with tf.name_scope(scope):
+                        self.sh = get_act_func(act_type=sl_param)(self.sh)
+                elif sl_type == 'drop':
+                    with tf.name_scope(scope):
+                        self.sh = tf.nn.dropout(self.sh, tf.where(self.training, sl_param, 1.))
+            # pair * batch * m -> batch * pair * m
+            self.sh = tf.transpose(self.sh, [1, 0, 2])
 
 
 class LR(Model):
@@ -322,9 +349,14 @@ class FM(Model):
         self.embedding_lookup()
 
         with tf.name_scope('inner_product'):
-            self.p = tf.square(tf.reduce_sum(self.xv, 1)) - tf.reduce_sum(tf.square(self.xv), 1)
+            # batch
+            self.p = tf.reduce_sum(
+                # batch * k
+                tf.square(tf.reduce_sum(self.xv, 1)) -
+                tf.reduce_sum(tf.square(self.xv), 1),
+                axis=1, keep_dims=True)
 
-        self.logits = tf.reduce_sum(self.xw, axis=1) + self.b + 0.5 * tf.reduce_sum(self.p, axis=1)
+        self.logits = tf.reduce_sum(self.xw, axis=1) + self.b + 0.5 * self.p
 
         self.preds = tf.sigmoid(self.logits)
 
@@ -385,11 +417,31 @@ class KFM(Model):
 
 
 class NFM(Model):
-    def __init__(self, input_dim, num_fields, embed_size=10, output_dim=1, init_type='xavier', l2_scale=0,
-                 loss_type='log_loss', pos_weight=1.):
+    def __init__(self, input_dim, num_fields, embed_size=10, sub_nn_layers=None, output_dim=1, init_type='xavier',
+                 l2_scale=0, loss_type='log_loss', pos_weight=1.):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight)
         self.embed_size = embed_size
-        # TODO: implement sub-net
+        self.sub_nn_layers = sub_nn_layers
+
+        self.def_placeholder(train_flag=True)
+
+        self.embedding_lookup()
+
+        xv_p, xv_q = unroll_pairwise(self.xv, num_fields=self.num_fields)
+        # batch * pair * 2k
+        self.sub_nn_input = tf.concat([xv_p, xv_q], axis=2)
+
+        self.def_sub_nn_layers()
+
+        self.logits = tf.reduce_sum(self.xw, axis=1) + self.b + tf.reduce_sum(self.sh, axis=1)
+
+        self.preds = tf.sigmoid(self.logits)
+
+        self.def_log_loss()
+
+        self.def_l2_loss()
+
+        self.loss = self.log_loss + self.l2_loss
 
 
 class FNN(Model):
@@ -507,8 +559,35 @@ class KPNN(Model):
 
 
 class PIN(Model):
-    def __init__(self, input_dim, num_fields, embed_size=10, output_dim=1, init_type='xavier', l2_scale=0,
-                 loss_type='log_loss', pos_weight=1.):
+    def __init__(self, input_dim, num_fields, embed_size=10, sub_nn_layers=None, nn_layers=None, output_dim=1,
+                 init_type='xavier', l2_scale=0, loss_type='log_loss', pos_weight=1.):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight)
         self.embed_size = embed_size
-        # TODO: implement sub-net
+        self.sub_nn_layers = sub_nn_layers
+        self.nn_layers = nn_layers
+
+        self.def_placeholder(train_flag=True)
+
+        self.embedding_lookup(weight_flag=False, bias_flag=False)
+
+        xv_p, xv_q = unroll_pairwise(self.xv, num_fields=self.num_fields)
+        # batch * pair * 2k
+        self.sub_nn_input = tf.concat([xv_p, xv_q], axis=2)
+
+        self.def_sub_nn_layers()
+
+        sh_dim = self.sh.get_shape().as_list()[-1]
+        sh_num = self.sh.get_shape().as_list()[-2]
+        self.nn_input = tf.reshape(self.sh, [-1, sh_num * sh_dim])
+
+        self.def_nn_layers()
+
+        self.logits = self.h
+
+        self.preds = tf.sigmoid(self.logits)
+
+        self.def_log_loss()
+
+        self.def_l2_loss()
+
+        self.loss = self.log_loss + self.l2_loss
