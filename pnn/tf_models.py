@@ -1,8 +1,7 @@
 from __future__ import division
 from __future__ import print_function
 
-import math
-
+import numpy as np
 import tensorflow as tf
 
 WEIGHTS = [tf.GraphKeys.GLOBAL_VARIABLES, tf.GraphKeys.WEIGHTS]
@@ -23,6 +22,8 @@ def as_model(model_name, **model_param):
         return NFM(**model_param)
     elif model_name == 'fnn':
         return FNN(**model_param)
+    elif model_name == 'ccpm':
+        return CCPM(**model_param)
     elif model_name == 'deepfm':
         return DeepFM(**model_param)
     elif model_name == 'ipnn':
@@ -45,11 +46,11 @@ def get_init_value(init_type='xavier', shape=None, mode='fan_avg',
         if len(shape) == 1:
             shape.append(1)
         if mode == 'fan_avg':
-            maxval = math.sqrt(6. / (shape[-2] + shape[-1]))
+            maxval = np.sqrt(6. / (shape[-2] + shape[-1]))
         elif mode == 'fan_in':
-            maxval = math.sqrt(3. / shape[-2])
+            maxval = np.sqrt(3. / shape[-2])
         else:
-            maxval = math.sqrt(3. / shape[-1])
+            maxval = np.sqrt(3. / shape[-1])
         ret_val = tf.random_uniform(shape=shape, minval=-maxval, maxval=maxval)
         return ret_val
     elif init_type == 'uniform':
@@ -239,7 +240,7 @@ class Model:
         num_pairs = int(self.num_fields * (self.num_fields - 1) / 2)
         with tf.name_scope('kernel_product'):
             if kernel is None:
-                maxval = math.sqrt(3. / self.embed_size)
+                maxval = np.sqrt(3. / self.embed_size)
                 kernel = tf.Variable(
                     get_init_value(init_type='uniform', shape=[self.embed_size, num_pairs, self.embed_size],
                                    minval=-maxval, maxval=maxval), name='kernel', dtype=dtype, collections=WEIGHTS)
@@ -270,7 +271,8 @@ class Model:
             self.h = self.nn_input
             h_dim = nn_input_dim
             for l_type, l_param in self.nn_layers:
-                assert l_type in {'full', 'act', 'drop'}, 'a layer should be {full, act, drop}'
+                assert l_type in {'full', 'act', 'drop', 'conv',
+                                  'flat'}, 'a layer should be {full, act, drop, conv, flat}'
                 if l_type == 'full':
                     with tf.name_scope('layer') as scope:
                         wi = tf.Variable(get_init_value(init_type=self.init_type, shape=[h_dim, l_param]), name='w',
@@ -285,6 +287,20 @@ class Model:
                 elif l_type == 'drop':
                     with tf.name_scope(scope):
                         self.h = tf.nn.dropout(self.h, tf.where(self.training, l_param, 1.))
+                elif l_type == 'conv':
+                    with tf.name_scope('conv') as scope:
+                        maxval = np.sqrt(6. / (l_param[0] * h_dim + l_param[1]))
+                        wi = tf.Variable(
+                            get_init_value(init_type='uniform', shape=[l_param[0], h_dim, l_param[1]], minval=-maxval,
+                                           maxval=maxval), name='w', dtype=dtype, collections=WEIGHTS)
+                        # bi = tf.Variable(get_init_value(init_type=0., shape=[l_param[0], l_param[1]]), name='b',
+                        #                  dtype=dtype, collections=BIASES)
+                        self.h = tf.nn.conv1d(self.h, wi, stride=1, padding='VALID')  # + bi
+                        h_dim = l_param[1]
+                elif l_type == 'flat':
+                    with tf.name_scope(scope):
+                        h_dim = np.prod(np.array(self.h.get_shape().as_list())[list(l_param)])
+                        self.h = tf.reshape(self.h, [-1, h_dim])
 
     def def_sub_nn_layers(self, sub_nn_input_dim=None, sub_nn_num=None, dtype=tf.float32):
         assert hasattr(self, 'sub_nn_input'), 'self.sub_nn_input not found'
@@ -456,6 +472,33 @@ class FNN(Model):
         self.embedding_lookup(weight_flag=False, bias_flag=False)
 
         self.nn_input = tf.reshape(self.xv, [-1, self.num_fields * self.embed_size])
+
+        self.def_nn_layers()
+
+        self.logits = self.h
+
+        self.preds = tf.sigmoid(self.logits)
+
+        self.def_log_loss()
+
+        self.def_l2_loss()
+
+        self.loss = self.log_loss + self.l2_loss
+
+
+class CCPM(Model):
+    def __init__(self, input_dim, num_fields, embed_size=10, nn_layers=None, output_dim=1, init_type='xavier',
+                 l2_scale=0, loss_type='log_loss', pos_weight=1.):
+        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight)
+        self.embed_size = embed_size
+        self.nn_layers = nn_layers
+
+        self.def_placeholder(train_flag=True)
+
+        self.embedding_lookup(weight_flag=False, bias_flag=False)
+
+        # batch * field * k
+        self.nn_input = self.xv
 
         self.def_nn_layers()
 

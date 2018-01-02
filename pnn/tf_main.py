@@ -40,7 +40,7 @@ IMAGE_PIXELS = 28
 
 backend = 'tf'
 data_name = 'ipinyou'
-model_name = 'pin'
+model_name = 'ccpm'
 
 
 def create_done_queue(i):
@@ -108,12 +108,16 @@ def main(_):
             model = as_model(model_name,
                              input_dim=dataset.num_features,
                              num_fields=dataset.num_fields,
-                             sub_nn_layers=[
-                                 ('full', 5),
-                                 ('act', 'relu'),
-                                 ('drop', 0.9),
-                                 ('full', 1), ],
+                             # sub_nn_layers=[
+                             #     ('full', 5),
+                             #     ('act', 'relu'),
+                             #     ('drop', 0.9),
+                             #     ('full', 1), ],
                              nn_layers=[
+                                 ('conv', (5, 10)),
+                                 ('act', 'relu'),
+                                 ('drop', 0.5),
+                                 ('flat', (1, 2)),
                                  ('full', 100),
                                  ('act', 'relu'),
                                  ('drop', 0.5),
