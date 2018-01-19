@@ -126,10 +126,12 @@ def main(_):
 
             global_step = tf.Variable(0, name='global_step', trainable=False)
 
-            train_op = tf.train.AdagradOptimizer(0.01).minimize(model.loss, global_step=global_step)
+            # train_op = tf.train.AdagradOptimizer(0.01).minimize(model.loss, global_step=global_step)
 
-            # opt_op = tf.train.AdagradOptimizer(0.01)
-            # train_op = tf.train.SyncReplicasOptimizer(opt_op, FLAGS.workers).minimize(loss, global_step=global_step)
+            opt_op = tf.train.AdagradOptimizer(0.01)
+            train_op = tf.train.SyncReplicasOptimizer(opt_op, replicas_to_aggregate=FLAGS.workers,
+                                                      total_num_replicas=FLAGS.workers).minimize(model.loss,
+                                                                                                 global_step=global_step)
 
             saver = tf.train.Saver()
             summary_op = tf.summary.merge_all()

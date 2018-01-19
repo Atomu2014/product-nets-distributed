@@ -100,3 +100,5 @@ data/
 log/
 tmp/
 fig/
+Rotate List_files/
+*.zip
