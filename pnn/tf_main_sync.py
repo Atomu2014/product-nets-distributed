@@ -120,12 +120,16 @@ def main(_):
 
             global_step = tf.Variable(0, name='global_step', trainable=False)
 
-            train_op = tf.train.AdagradOptimizer(0.01).minimize(model.loss, global_step=global_step)
+            # train_op = tf.train.AdagradOptimizer(0.01).minimize(model.loss, global_step=global_step)
 
-            # opt_op = tf.train.AdagradOptimizer(0.01)
-            # train_op = tf.train.SyncReplicasOptimizer(opt_op, replicas_to_aggregate=FLAGS.workers,
-            #                                          total_num_replicas=FLAGS.workers).minimize(model.loss,
-            #                                                                                     global_step=global_step)
+            optimizer = tf.train.AdagradOptimizer(0.01)
+            grads_and_vars = optimizer.compute_gradients(model.loss)
+
+            rep_op = tf.train.SyncReplicasOptimizer(optimizer, replicas_to_aggregate=FLAGS.workers,
+                                                    total_num_replicas=FLAGS.workers, use_locking=True)
+            train_op = rep_op.apply_gradients(grads_and_vars, global_step=global_step)
+            init_token_op = rep_op.get_init_tokens_op()
+            chief_queue_runner = rep_op.get_chief_queue_runner()
 
             saver = tf.train.Saver()
             summary_op = tf.summary.merge_all()
@@ -150,6 +154,8 @@ def main(_):
         # The supervisor takes care of session initialization, restoring from
         # a checkpoint, and closing when done or an error occurs.
         with sv.managed_session(server.target) as sess:
+            sv.start_queue_runners(sess, [chief_queue_runner])
+            sess.run(init_token_op)
             # Loop until the supervisor shuts down or 100000 steps have completed.
             step = 0
             while not sv.should_stop() and step < FLAGS.max_step:
