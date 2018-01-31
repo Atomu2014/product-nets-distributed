@@ -15,8 +15,8 @@ from datasets import as_dataset
 from tf_models import as_model
 
 # Flags for defining the tf.train.ClusterSpec
-tf.app.flags.DEFINE_string('ps_hosts', 'localhost:12345', 'Comma-separated list of hostname:port pairs')
-tf.app.flags.DEFINE_string('worker_hosts', 'localhost:12346,localhost:12347',
+tf.app.flags.DEFINE_string('ps_hosts', '172.16.2.248:12345', 'Comma-separated list of hostname:port pairs')
+tf.app.flags.DEFINE_string('worker_hosts', '172.16.2.245:12346,172.16.2.246:12347',
                            'Comma-separated list of hostname:port pairs')
 
 # Flags for defining the tf.train.Server
@@ -26,7 +26,7 @@ tf.app.flags.DEFINE_integer('hidden_units', 100, 'Number of units in the hidden 
 tf.app.flags.DEFINE_string('log_dir', '../log', 'Directory for storing mnist data')
 tf.app.flags.DEFINE_integer('batch_size', 100, 'Training batch size')
 tf.app.flags.DEFINE_integer('test_batch_size', 1000, 'testing batch size')
-tf.app.flags.DEFINE_integer('workers', 2, 'Number of workers')
+tf.app.flags.DEFINE_integer('workers', 1, 'Number of workers')
 tf.app.flags.DEFINE_integer('ps', 1, 'Number of ps')
 tf.app.flags.DEFINE_integer('max_step', 1000, 'Number of max steps')
 

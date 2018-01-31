@@ -2,6 +2,7 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
+from sklearn.metrics import log_loss, roc_auc_score
 import tensorflow as tf
 
 WEIGHTS = [tf.GraphKeys.GLOBAL_VARIABLES, tf.GraphKeys.WEIGHTS]
@@ -191,21 +192,23 @@ class Model:
             self.xw, self.xv, self.b = None, None, None
             if weight_flag:
                 w = tf.Variable(initial_value=get_init_value(init_type=self.init_type, shape=[self.input_dim]),
-                                name='w', dtype=dtype, collections=WEIGHTS)
+                                name='w', dtype=dtype)
                 self.xw = tf.gather(w, self.inputs)
+                tf.add_to_collection(tf.GraphKeys.WEIGHTS, self.xw)
             if vector_flag:
                 if not field_aware:
                     v = tf.Variable(
                         initial_value=get_init_value(init_type=self.init_type, shape=[self.input_dim, self.embed_size]),
-                        name='v', dtype=dtype, collections=WEIGHTS)
+                        name='v', dtype=dtype)
                     self.xv = tf.gather(v, self.inputs)
                 else:
                     v = tf.Variable(
                         initial_value=get_init_value(init_type=self.init_type,
                                                      shape=[self.input_dim, (self.num_fields - 1) * self.embed_size]),
-                        name='v', dtype=dtype, collections=[tf.GraphKeys.GLOBAL_VARIABLES, tf.GraphKeys.WEIGHTS])
+                        name='v', dtype=dtype)
                     v = tf.reshape(v, [self.input_dim, self.num_fields - 1, self.embed_size])
                     self.xv = tf.gather(v, self.inputs)
+                tf.add_to_collection(tf.GraphKeys.WEIGHTS, self.xv)
             if bias_flag:
                 self.b = tf.Variable(initial_value=get_init_value(init_type=0., shape=[1]), name='b', dtype=dtype,
                                      collections=BIASES)
@@ -230,6 +233,15 @@ class Model:
                 self.l2_loss = tf.constant(0.)
         else:
             self.l2_loss = tf.constant(0.)
+
+    def def_inner_product(self, ):
+        with tf.name_scope('inner_product'):
+            # batch * 1
+            self.p = tf.reduce_sum(
+                # batch * k
+                tf.square(tf.reduce_sum(self.xv, 1)) -
+                tf.reduce_sum(tf.square(self.xv), 1),
+                axis=1, keep_dims=True)
 
     def def_kernel_product(self, kernel=None, dtype=tf.float32):
         """
@@ -333,6 +345,26 @@ class Model:
             # pair * batch * m -> batch * pair * m
             self.sh = tf.transpose(self.sh, [1, 0, 2])
 
+    def eval(self, gen, sess):
+        labels = []
+        preds = []
+        for xs, ys in gen:
+            feed = {self.inputs: xs, self.labels: ys}
+            if self.training is not None:
+                feed[self.training] = False
+            _preds_ = sess.run(self.preds, feed_dict=feed)
+            labels.append(ys)
+            preds.append(_preds_)
+        labels = np.vstack(labels)
+        preds = np.vstack(preds)
+        eps = 1e-6
+        preds[preds < eps] = eps
+        preds[preds > 1 - eps] = 1 - eps
+        _loss_ = log_loss(y_true=labels, y_pred=preds)
+        _auc_ = roc_auc_score(y_true=labels, y_score=preds)
+        print('%s-Loss: %2.4f, AUC: %2.4f' % (gen.gen_type.capitalize(), _loss_, _auc_))
+        return _loss_, _auc_
+
 
 class LR(Model):
     def __init__(self, input_dim, num_fields, output_dim=1, init_type='xavier', l2_scale=0, loss_type='log_loss',
@@ -364,13 +396,7 @@ class FM(Model):
 
         self.embedding_lookup()
 
-        with tf.name_scope('inner_product'):
-            # batch
-            self.p = tf.reduce_sum(
-                # batch * k
-                tf.square(tf.reduce_sum(self.xv, 1)) -
-                tf.reduce_sum(tf.square(self.xv), 1),
-                axis=1, keep_dims=True)
+        self.def_inner_product()
 
         self.logits = tf.reduce_sum(self.xw, axis=1) + self.b + 0.5 * self.p
 
@@ -524,14 +550,13 @@ class DeepFM(Model):
 
         self.embedding_lookup(bias_flag=False)
 
-        with tf.name_scope('inner_product'):
-            self.p = tf.square(tf.reduce_sum(self.xv, 1)) - tf.reduce_sum(tf.square(self.xv), 1)
+        self.def_inner_product()
 
         self.nn_input = tf.reshape(self.xv, [-1, self.num_fields * self.embed_size])
 
         self.def_nn_layers()
 
-        self.logits = tf.reduce_sum(self.xw, axis=1) + 0.5 * tf.reduce_sum(self.p, axis=1) + self.h
+        self.logits = tf.reduce_sum(self.xw, axis=1) + 0.5 * self.p + self.h
 
         self.preds = tf.sigmoid(self.logits)
 
