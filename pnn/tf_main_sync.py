@@ -48,6 +48,7 @@ tf.app.flags.DEFINE_string('nn_layers', '[["full", 100], ["act", "relu"], ["full
 tf.app.flags.DEFINE_string('sub_nn_layers', '', 'Sub-network structure')
 
 # tf.app.flags.DEFINE_integer('max_step', 1000, 'Number of max steps')
+tf.app.flags.DEFINE_integer('max_data', 0, 'Number of instances')
 tf.app.flags.DEFINE_integer('num_rounds', 1, 'Number of training rounds')
 tf.app.flags.DEFINE_integer('eval_level', 1, 'Evaluating frequency in one round')
 tf.app.flags.DEFINE_integer('log_frequency', 100, 'Logging frequency')
@@ -126,7 +127,6 @@ def main(_):
         _config_['valid_data_param'] = valid_data_param
         _config_['test_data_param'] = test_data_param
         _config_['dataset'] = FLAGS.dataset
-        _config_['num_days'] = FLAGS.num_days
 
         # Assigns ops to the local worker by default.
         with tf.device(tf.train.replica_device_setter(

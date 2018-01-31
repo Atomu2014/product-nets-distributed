@@ -21,29 +21,27 @@ from print_hook import PrintHook
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('logdir', '../log', 'Directory for storing mnist data')
 tf.app.flags.DEFINE_bool('val', False, 'If True, use validation set, else use test set')
-tf.app.flags.DEFINE_integer('batch_size', 500, 'Training batch size')
+tf.app.flags.DEFINE_integer('batch_size', 2000, 'Training batch size')
 tf.app.flags.DEFINE_integer('test_batch_size', 10000, 'Testing batch size')
-tf.app.flags.DEFINE_float('learning_rate', 1e-3, 'Learning rate')
+tf.app.flags.DEFINE_float('learning_rate', 1e-2, 'Learning rate')
 
 tf.app.flags.DEFINE_string('dataset', 'criteo_9d', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
 tf.app.flags.DEFINE_string('model', 'pin', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
 tf.app.flags.DEFINE_float('l2_scale', 0., 'L2 regularization')
 tf.app.flags.DEFINE_integer('embed_size', 20, 'Embedding size')
 # e.g. [["conv", [5, 10]], ["act", "relu"], ["drop", 0.5], ["flat", [1, 2]], ["full", 100], ["act", "relu"], ["drop", 0.5], ["full", 1]]
-tf.app.flags.DEFINE_string('nn_layers', '[["full", 700], ["act", "relu"], ["full, 700"], ["act", "relu"], ["full, 700"], ["act", "relu"], ["full, 700"], ["act", "relu"], ["full, 700"], ["act", "relu"], ["full", 1]]', 'Network structure')
+tf.app.flags.DEFINE_string('nn_layers', '[["full", 100], ["act", "relu"], ["full", 1]]', 'Network structure')
 # e.g. [["full", 5], ["act", "relu"], ["drop", 0.9], ["full", 1]]
 tf.app.flags.DEFINE_string('sub_nn_layers', '[["full", 5], ["act", "relu"], ["full", 1]]', 'Sub-network structure')
 
-# tf.app.flags.DEFINE_integer('max_step', 1000, 'Number of max steps')
+tf.app.flags.DEFINE_integer('max_step', 0, 'Number of max steps')
+tf.app.flags.DEFINE_integer('max_data', 0, 'Number of instances')
 tf.app.flags.DEFINE_integer('num_rounds', 10, 'Number of training rounds')
 tf.app.flags.DEFINE_integer('eval_level', 1, 'Evaluating frequency level')
 tf.app.flags.DEFINE_integer('log_frequency', 100, 'Logging frequency')
 
 
 def main(_):
-    # for k, v in FLAGS.__flags.items():
-    #     print(k, v)
-
     _config_ = {}
     logdir = '%s/%s/%s/%s' % (FLAGS.logdir, FLAGS.dataset, FLAGS.model, datetime.utcnow().strftime('%Y-%m-%d-%H-%M-%S'))
     if not os.path.exists(logdir):
@@ -85,7 +83,6 @@ def main(_):
     _config_['valid_data_param'] = valid_data_param
     _config_['test_data_param'] = test_data_param
     _config_['dataset'] = FLAGS.dataset
-    _config_['num_days'] = FLAGS.num_days
 
     tf.reset_default_graph()
     model_param = {'l2_scale': FLAGS.l2_scale}
@@ -117,7 +114,8 @@ def main(_):
     saver = tf.train.Saver()
     train_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'train'), graph=sess.graph, flush_secs=30)
     test_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'test'), graph=sess.graph, flush_secs=30)
-    valid_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'valid'), graph=sess.graph, flush_secs=30) if FLAGS.val else test_writer
+    valid_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'valid'), graph=sess.graph,
+                                         flush_secs=30) if FLAGS.val else test_writer
     tf.global_variables_initializer().run(session=sess)
 
     step = 1
@@ -126,7 +124,7 @@ def main(_):
     print('%d rounds, %d steps per round' % (FLAGS.num_rounds, num_steps))
     for r in range(FLAGS.num_rounds):
         for batch_xs, batch_ys in train_gen:
-            if step * FLAGS.batch_size == 1000000:
+            if FLAGS.max_data and FLAGS.max_data == step * FLAGS.batch_size:
                 print('Finish')
                 exit(0)
             train_feed = {model.inputs: batch_xs, model.labels: batch_ys}
