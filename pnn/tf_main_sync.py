@@ -3,7 +3,6 @@ from __future__ import print_function
 
 import json
 import os
-import shutil
 import sys
 import time
 from datetime import datetime
@@ -12,12 +11,12 @@ import numpy as np
 import tensorflow as tf
 
 import __init__
-from print_hook import PrintHook
 
 sys.path.append(__init__.config['data_path'])
 from datasets import as_dataset
 
 from tf_models import as_model
+from print_hook import PrintHook
 
 FLAGS = tf.app.flags.FLAGS
 # Flags for defining the tf.train.ClusterSpec
@@ -33,12 +32,12 @@ tf.app.flags.DEFINE_integer('workers', 2, 'Number of workers')
 tf.app.flags.DEFINE_bool('sync', True, 'Synchronized training')
 
 tf.app.flags.DEFINE_string('logdir', '../log', 'Directory for storing mnist data')
+tf.app.flags.DEFINE_bool('val', False, 'If True, use validation set, else use test set')
 tf.app.flags.DEFINE_integer('batch_size', 2000, 'Training batch size')
 tf.app.flags.DEFINE_integer('test_batch_size', 10000, 'testing batch size')
 tf.app.flags.DEFINE_float('learning_rate', 1e-2, 'Learning rate')
 
-tf.app.flags.DEFINE_string('dataset', 'criteo_all', 'Dataset = ipinyou, avazu, criteo, criteo_all, criteo_all:16"')
-tf.app.flags.DEFINE_integer('num_days', 9, '# days to use in criteo_all')
+tf.app.flags.DEFINE_string('dataset', 'criteo_9d', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
 tf.app.flags.DEFINE_string('model', 'fnn', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
 tf.app.flags.DEFINE_float('l2_scale', 0., 'L2 regularization')
 tf.app.flags.DEFINE_integer('embed_size', 20, 'Embedding size')
@@ -99,7 +98,6 @@ def main(_):
             print('ps %d received done %d' % (FLAGS.task_index, i))
         print('ps %d: quitting' % (FLAGS.task_index))
     elif FLAGS.job_name == 'worker':
-        dataset = as_dataset(FLAGS.dataset, num_days=FLAGS.num_days)
         train_data_param = {
             'gen_type': 'train',
             'random_sample': True,
@@ -120,10 +118,10 @@ def main(_):
             'batch_size': FLAGS.test_batch_size,
             'squeeze_output': False,
         }
-        # TODO implement parallel reading
+        dataset = as_dataset(FLAGS.dataset)
         train_gen = dataset.batch_generator(train_data_param)
-        valid_gen = dataset.batch_generator(valid_data_param)
         test_gen = dataset.batch_generator(test_data_param)
+        valid_gen = dataset.batch_generator(valid_data_param) if FLAGS.val else test_gen
         _config_['train_data_param'] = train_data_param
         _config_['valid_data_param'] = valid_data_param
         _config_['test_data_param'] = test_data_param
@@ -182,8 +180,8 @@ def main(_):
                                  init_op=init_op,
                                  summary_op=summary_op,
                                  saver=saver,
-                                 global_step=global_step,)
-                                 # save_model_secs=60)
+                                 global_step=global_step, )
+        # save_model_secs=60)
 
         # The supervisor takes care of session initialization, restoring from
         # a checkpoint, and closing when done or an error occurs.
@@ -191,23 +189,29 @@ def main(_):
             if FLAGS.sync:
                 sv.start_queue_runners(sess, [chief_queue_runner])
                 sess.run(init_token_op)
-            train_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'train'), graph=sess.graph, flush_secs=30)
-            valid_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'valid'), graph=sess.graph, flush_secs=30)
-            test_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'test'), graph=sess.graph, flush_secs=30)
+            if FLAGS.task_index == 0:
+                train_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'train'), graph=sess.graph,
+                                                     flush_secs=30)
+                test_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'test'), graph=sess.graph,
+                                                    flush_secs=30)
+                valid_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'valid'), graph=sess.graph,
+                                                     flush_secs=30) if FLAGS.val else test_writer
 
             # Loop until the supervisor shuts down or 100000 steps have completed.
             step = 1
             start_time = time.time()
             num_steps = int(np.ceil(dataset.train_size / FLAGS.batch_size / FLAGS.workers))
+            print('%d rounds, %d steps per round' % (FLAGS.num_rounds, num_steps))
             for r in range(FLAGS.num_rounds):
-                # if sv.should_stop() or step >= FLAGS.max_step:
-                #     break
                 for batch_xs, batch_ys in train_gen:
-                    # if sv.should_stop() or step >= FLAGS.max_step:
-                    #     break
-                    if step * FLAGS.batch_size == 2000000 / FLAGS.workers:
-                        print('Finish')
-                        exit(0)
+                    if FLAGS.sync:
+                        if step * FLAGS.batch_size * FLAGS.workers == 1000000:
+                            print('Finish')
+                            exit(0)
+                    else:
+                        if step * FLAGS.batch_size == 1000000:
+                            print('Finish')
+                            exit(0)
                     train_feed = {model.inputs: batch_xs, model.labels: batch_ys}
                     if model.training is not None:
                         train_feed[model.training] = True
@@ -219,25 +223,30 @@ def main(_):
                     if step % FLAGS.log_frequency == 0:
                         print('Done step %d AvgTime: %3.2fms, Elapsed: %.2fs, Train-Loss: %.4f' % (
                             step, float(elapsed_time * 1000 / step), elapsed_time, _loss_))
-                        summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=_loss_),
-                                                    tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
-                                                    tf.Summary.Value(tag='l2_loss', simple_value=_l2_loss_)])
-                        train_writer.add_summary(summary, global_step=step)
+                        if FLAGS.task_index == 0:
+                            summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=_loss_),
+                                                        tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
+                                                        tf.Summary.Value(tag='l2_loss', simple_value=_l2_loss_)])
+                            train_writer.add_summary(summary, global_step=step)
 
-                    if r < FLAGS.num_rounds - 1 or step % num_steps:
-                        if FLAGS.eval_level and (
-                                            step % int(
-                                            np.ceil(num_steps / FLAGS.eval_level)) == 0 or step % num_steps == 0):
-                            _log_loss_, _auc_ = model.eval(test_gen, sess)
-                            summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
-                                                        tf.Summary.Value(tag='auc', simple_value=_auc_)])
-                            test_writer.add_summary(summary, global_step=step)
-                saver.save(sess, os.path.join(logdir, 'checkpoints', 'model.ckpt'), step)
+                    if FLAGS.task_index == 0:
+                        if r < FLAGS.num_rounds - 1 or step % num_steps:
+                            if FLAGS.eval_level and (
+                                                step % int(
+                                                np.ceil(num_steps / FLAGS.eval_level)) == 0 or step % num_steps == 0):
+                                _log_loss_, _auc_ = model.eval(valid_gen, sess)
+                                summary = tf.Summary(
+                                    value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
+                                           tf.Summary.Value(tag='auc', simple_value=_auc_)])
+                                valid_writer.add_summary(summary, global_step=step)
+                if FLAGS.task_index == 0:
+                    saver.save(sess, os.path.join(logdir, 'checkpoints', 'model.ckpt'), step)
 
-            _log_loss_, _auc_ = model.eval(test_gen, sess)
-            summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
-                                        tf.Summary.Value(tag='auc', simple_value=_auc_)])
-            test_writer.add_summary(summary, global_step=step)
+            if FLAGS.task_index == 0:
+                _log_loss_, _auc_ = model.eval(test_gen, sess)
+                summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
+                                            tf.Summary.Value(tag='auc', simple_value=_auc_)])
+                test_writer.add_summary(summary, global_step=step)
             print('Total Time: %3.2fs' % float(time.time() - start_time))
             # signal to ps shards that we are done
             # for q in create_done_queues():

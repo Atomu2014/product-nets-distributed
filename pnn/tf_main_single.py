@@ -20,28 +20,30 @@ from print_hook import PrintHook
 
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('logdir', '../log', 'Directory for storing mnist data')
-tf.app.flags.DEFINE_integer('batch_size', 2000, 'Training batch size')
+tf.app.flags.DEFINE_bool('val', False, 'If True, use validation set, else use test set')
+tf.app.flags.DEFINE_integer('batch_size', 500, 'Training batch size')
 tf.app.flags.DEFINE_integer('test_batch_size', 10000, 'Testing batch size')
-tf.app.flags.DEFINE_float('learning_rate', 1e-2, 'Learning rate')
+tf.app.flags.DEFINE_float('learning_rate', 1e-3, 'Learning rate')
 
-tf.app.flags.DEFINE_string('dataset', 'criteo_all', 'Dataset = ipinyou, avazu, criteo, criteo_all"')
-tf.app.flags.DEFINE_integer('num_days', 9, '# days to use in criteo_all')
-tf.app.flags.DEFINE_string('model', 'fnn', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
+tf.app.flags.DEFINE_string('dataset', 'criteo_9d', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
+tf.app.flags.DEFINE_string('model', 'pin', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
 tf.app.flags.DEFINE_float('l2_scale', 0., 'L2 regularization')
 tf.app.flags.DEFINE_integer('embed_size', 20, 'Embedding size')
 # e.g. [["conv", [5, 10]], ["act", "relu"], ["drop", 0.5], ["flat", [1, 2]], ["full", 100], ["act", "relu"], ["drop", 0.5], ["full", 1]]
-tf.app.flags.DEFINE_string('nn_layers', '[["full", 100], ["act", "relu"], ["full", 1]]',
-                           'Network structure')
+tf.app.flags.DEFINE_string('nn_layers', '[["full", 700], ["act", "relu"], ["full, 700"], ["act", "relu"], ["full, 700"], ["act", "relu"], ["full, 700"], ["act", "relu"], ["full, 700"], ["act", "relu"], ["full", 1]]', 'Network structure')
 # e.g. [["full", 5], ["act", "relu"], ["drop", 0.9], ["full", 1]]
 tf.app.flags.DEFINE_string('sub_nn_layers', '[["full", 5], ["act", "relu"], ["full", 1]]', 'Sub-network structure')
 
 # tf.app.flags.DEFINE_integer('max_step', 1000, 'Number of max steps')
-tf.app.flags.DEFINE_integer('num_rounds', 5, 'Number of training rounds')
+tf.app.flags.DEFINE_integer('num_rounds', 10, 'Number of training rounds')
 tf.app.flags.DEFINE_integer('eval_level', 1, 'Evaluating frequency level')
 tf.app.flags.DEFINE_integer('log_frequency', 100, 'Logging frequency')
 
 
 def main(_):
+    # for k, v in FLAGS.__flags.items():
+    #     print(k, v)
+
     _config_ = {}
     logdir = '%s/%s/%s/%s' % (FLAGS.logdir, FLAGS.dataset, FLAGS.model, datetime.utcnow().strftime('%Y-%m-%d-%H-%M-%S'))
     if not os.path.exists(logdir):
@@ -75,15 +77,15 @@ def main(_):
         'batch_size': FLAGS.test_batch_size,
         'squeeze_output': False,
     }
+    dataset = as_dataset(FLAGS.dataset)
+    train_gen = dataset.batch_generator(train_data_param)
+    test_gen = dataset.batch_generator(test_data_param)
+    valid_gen = dataset.batch_generator(valid_data_param) if FLAGS.val else test_gen
     _config_['train_data_param'] = train_data_param
     _config_['valid_data_param'] = valid_data_param
     _config_['test_data_param'] = test_data_param
-    dataset = as_dataset(FLAGS.dataset, num_days=FLAGS.num_days)
     _config_['dataset'] = FLAGS.dataset
     _config_['num_days'] = FLAGS.num_days
-    train_gen = dataset.batch_generator(train_data_param)
-    valid_gen = dataset.batch_generator(valid_data_param)
-    test_gen = dataset.batch_generator(test_data_param)
 
     tf.reset_default_graph()
     model_param = {'l2_scale': FLAGS.l2_scale}
@@ -110,11 +112,12 @@ def main(_):
     sess = tf.Session(config=config)
     global_step = tf.Variable(1, name='global_step', trainable=False)
     # learning_rate = tf.placeholder(name='learning_rate', dtype=tf.float32)
-    train_op = tf.train.AdagradOptimizer(FLAGS.learning_rate).minimize(model.loss, global_step=global_step)
+    # train_op = tf.train.AdagradOptimizer(FLAGS.learning_rate).minimize(model.loss, global_step=global_step)
+    train_op = tf.train.AdamOptimizer(FLAGS.learning_rate).minimize(model.loss, global_step=global_step)
     saver = tf.train.Saver()
     train_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'train'), graph=sess.graph, flush_secs=30)
-    valid_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'valid'), graph=sess.graph, flush_secs=30)
     test_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'test'), graph=sess.graph, flush_secs=30)
+    valid_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'valid'), graph=sess.graph, flush_secs=30) if FLAGS.val else test_writer
     tf.global_variables_initializer().run(session=sess)
 
     step = 1
@@ -123,9 +126,9 @@ def main(_):
     print('%d rounds, %d steps per round' % (FLAGS.num_rounds, num_steps))
     for r in range(FLAGS.num_rounds):
         for batch_xs, batch_ys in train_gen:
-            # if step >= FLAGS.max_step:
-            #     break
-
+            if step * FLAGS.batch_size == 1000000:
+                print('Finish')
+                exit(0)
             train_feed = {model.inputs: batch_xs, model.labels: batch_ys}
             if model.training is not None:
                 train_feed[model.training] = True
@@ -144,11 +147,12 @@ def main(_):
             if r < FLAGS.num_rounds - 1 or step % num_steps:
                 if FLAGS.eval_level and (
                                     step % int(np.ceil(num_steps / FLAGS.eval_level)) == 0 or step % num_steps == 0):
-                    _log_loss_, _auc_ = model.eval(test_gen, sess)
+                    _log_loss_, _auc_ = model.eval(valid_gen, sess)
                     summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
                                                 tf.Summary.Value(tag='auc', simple_value=_auc_)])
-                    test_writer.add_summary(summary, global_step=step)
-        saver.save(sess, os.path.join(logdir, 'checkpoints', 'model.ckpt'), step)
+                    valid_writer.add_summary(summary, global_step=step)
+        if FLAGS.task_index == 0:
+            saver.save(sess, os.path.join(logdir, 'checkpoints', 'model.ckpt'), step)
 
     _log_loss_, _auc_ = model.eval(test_gen, sess)
     summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
