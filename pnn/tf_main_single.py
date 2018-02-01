@@ -52,7 +52,7 @@ def get_optimizer(opt, lr, **kwargs):
     if opt == 'sgd' or 'gd':
         return tf.train.GradientDescentOptimizer(learning_rate=lr)
     elif opt == 'adam':
-        return tf.train.AdamOptimizer(learning_rate=lr, epsilon=eps)
+        return tf.train.AdamOptimizer(learning_rate=lr)#, epsilon=eps)
     elif opt == 'adagrad':
         return tf.train.AdagradOptimizer(learning_rate=lr)
 
@@ -61,7 +61,6 @@ def main(_):
     _config_ = {}
     for k, v in FLAGS.__flags.iteritems():
         _config_[k] = getattr(FLAGS, k)
-    print(_config_)
     for k, v in __init__.config.iteritems():
         if k != 'default':
             _config_[k] = v
@@ -143,7 +142,6 @@ def main(_):
     num_steps = int(np.ceil(dataset.train_size / FLAGS.batch_size))
     eval_steps = int(np.ceil(num_steps / FLAGS.eval_level)) if FLAGS.eval_level else 0
     print('%d rounds, %d steps per round' % (FLAGS.num_rounds, num_steps))
-    model.eval(test_gen, sess)
     for r in range(1, FLAGS.num_rounds + 1):
         for batch_xs, batch_ys in train_gen:
             if FLAGS.max_data and FLAGS.max_data == step * FLAGS.batch_size:
@@ -157,7 +155,7 @@ def main(_):
                                                                model.l2_loss], feed_dict=train_feed)
             if step % FLAGS.log_frequency == 0:
                 elapsed_time = time.time() - start_time
-                print('Done step %d, Elapsed: %.2fs, Train-Loss: %.4f, Log-Loss: %.4f, L2-Loss: %.4f'
+                print('Done step %d, Elapsed: %.2fs, Train-Loss: %.4f, Log-Loss: %.4f, L2-Loss: %g'
                       % (step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
                 summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=_loss_),
                                             tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),

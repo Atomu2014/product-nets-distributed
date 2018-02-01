@@ -36,17 +36,17 @@ default_values_qu = {
     'log_frequency': 100,
 }
 
-default_params_nmz = {
+default_values_nmz = {
     'logdir': '../log',
     'val': False,
-    'batch_size': 2000,
+    'batch_size': 4000,
     'test_batch_size': 2000,
-    'learning_rate': 1e-3,
+    'learning_rate': 1e-4,
     'dataset': 'criteo_9d',
     'model': 'pin',
     'optimizer': 'adam',
-    'l2_scale': 0.,
-    'embed_size': 20,
+    'l2_scale': 1e-6,
+    'embed_size': 30,
     'nn_layers': '[["full", 700], ["act", "relu"], '
                  '["full", 700], ["act", "relu"], '
                  '["full", 700], ["act", "relu"], '
@@ -62,4 +62,4 @@ default_params_nmz = {
     'log_frequency': 1000,
 }
 
-config['default'] = default_values_qu
+config['default'] = default_values_nmz

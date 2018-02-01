@@ -225,10 +225,10 @@ class Model:
                                                          pos_weight=self.pos_weight))
 
     def def_l2_loss(self):
-        if self.l2_loss > 0:
+        if self.l2_scale > 0:
             weights = tf.get_collection(tf.GraphKeys.WEIGHTS)
             if len(weights) > 0:
-                self.l2_loss = tf.add_n([tf.nn.l2_loss(v) for v in weights])
+                self.l2_loss = self.l2_scale * tf.add_n([tf.nn.l2_loss(v) for v in weights])
             else:
                 self.l2_loss = tf.constant(0.)
         else:
