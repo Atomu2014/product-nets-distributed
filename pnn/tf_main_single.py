@@ -145,8 +145,8 @@ def main(_):
     print('%d rounds, %d steps per round' % (FLAGS.num_rounds, num_steps))
     for r in range(1, FLAGS.num_rounds + 1):
         for batch_xs, batch_ys in train_gen:
-            if FLAGS.max_data and FLAGS.max_data == step * FLAGS.batch_size:
-                print('Finish')
+            if FLAGS.max_data and FLAGS.max_data <= step * FLAGS.batch_size:
+                print('Finish %d, Elapsed: %.4f' % (step * FLAGS.batch_size, time.time() - start_time))
                 exit(0)
             train_feed = {model.inputs: batch_xs, model.labels: batch_ys}
             if model.training is not None:
