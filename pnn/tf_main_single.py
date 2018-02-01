@@ -59,7 +59,7 @@ def get_optimizer(opt, lr, **kwargs):
 
 def main(_):
     _config_ = FLAGS.__flags.copy()
-    for k, v in __init__.config:
+    for k, v in __init__.config.iteritems():
         if k != 'default':
             _config_[k] = v
     logdir = '%s/%s/%s/%s' % (FLAGS.logdir, FLAGS.dataset, FLAGS.model, datetime.utcnow().strftime('%Y-%m-%d-%H-%M-%S'))
