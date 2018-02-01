@@ -149,8 +149,7 @@ def main(_):
                     summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
                                                 tf.Summary.Value(tag='auc', simple_value=_auc_)])
                     valid_writer.add_summary(summary, global_step=step)
-        if FLAGS.task_index == 0:
-            saver.save(sess, os.path.join(logdir, 'checkpoints', 'model.ckpt'), step)
+        saver.save(sess, os.path.join(logdir, 'checkpoints', 'model.ckpt'), step)
 
     _log_loss_, _auc_ = model.eval(test_gen, sess)
     summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
