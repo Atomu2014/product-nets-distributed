@@ -45,7 +45,7 @@ default_values_nmz = {
     'dataset': 'criteo_9d',
     'model': 'pin',
     'optimizer': 'adam',
-    'l2_scale': 1e-6,
+    'l2_scale': 0,
     'embed_size': 30,
     'nn_layers': '[["full", 700], ["act", "relu"], '
                  '["full", 700], ["act", "relu"], '

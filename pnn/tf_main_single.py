@@ -49,10 +49,10 @@ tf.app.flags.DEFINE_integer('log_frequency', default_values['log_frequency'], 'L
 def get_optimizer(opt, lr, **kwargs):
     opt = opt.lower()
     eps = kwargs['epsilon'] if 'epsilon' in kwargs else 1e-8
-    if opt == 'sgd' or 'gd':
+    if opt == 'sgd' or opt == 'gd':
         return tf.train.GradientDescentOptimizer(learning_rate=lr)
     elif opt == 'adam':
-        return tf.train.AdamOptimizer(learning_rate=lr)#, epsilon=eps)
+        return tf.train.AdamOptimizer(learning_rate=lr, epsilon=eps)
     elif opt == 'adagrad':
         return tf.train.AdagradOptimizer(learning_rate=lr)
 
@@ -121,7 +121,8 @@ def main(_):
     global_step = tf.Variable(1, name='global_step', trainable=False)
     # learning_rate = tf.placeholder(name='learning_rate', dtype=tf.float32)
     # train_op = tf.train.AdagradOptimizer(FLAGS.learning_rate).minimize(model.loss, global_step=global_step)
-    train_op = get_optimizer(FLAGS.optimizer, FLAGS.learning_rate).minimize(model.loss, global_step=global_step)
+    opt = get_optimizer(FLAGS.optimizer, FLAGS.learning_rate)
+    train_op = opt.minimize(model.loss, global_step=global_step)
     saver = tf.train.Saver()
 
     train_gen = dataset.batch_generator(train_data_param)
