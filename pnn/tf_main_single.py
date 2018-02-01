@@ -58,7 +58,10 @@ def get_optimizer(opt, lr, **kwargs):
 
 
 def main(_):
-    _config_ = FLAGS.__flags.copy()
+    _config_ = {}
+    for k, v in FLAGS.__flags.iteritems():
+        _config_[k] = getattr(FLAGS, k)
+    print(_config_)
     for k, v in __init__.config.iteritems():
         if k != 'default':
             _config_[k] = v
