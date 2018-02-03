@@ -18,28 +18,36 @@ else:
 
 default_values_qu = {
     'logdir': '../log',
+    'restore': False,
     'val': False,
     'batch_size': 2000,
-    'test_batch_size': 10000,
-    'learning_rate': 1e-2,
+    'test_batch_size': 5000,
+    'learning_rate': 1e-4,
     'dataset': 'criteo_9d',
     'model': 'pin',
-    'optimizer': 'adagrad',
-    'l2_scale': 0.,
-    'embed_size': 20,
-    'nn_layers': '[["full", 100], ["act", "relu"], ["full", 1]]',
-    'sub_nn_layers': '[["full", 5], ["act", "relu"], ["full", 1]]',
+    'optimizer': 'adam',
+    'l2_scale': 0,
+    'embed_size': 30,
+    'nn_layers': '[["full", 700], ["act", "relu"], '
+                 '["full", 700], ["act", "relu"], '
+                 '["full", 700], ["act", "relu"], '
+                 '["full", 700], ["act", "relu"], '
+                 '["full", 700], ["act", "relu"], '
+                 '["full", 1]]',
+    'sub_nn_layers': '[["full", 40], ["act", "relu"], '
+                     '["full", 5]]',
     'max_step': 0,
     'max_data': 0,
-    'num_rounds': 1,
-    'eval_level': 1,
-    'log_frequency': 100,
+    'num_rounds': 2,
+    'eval_level': 5,
+    'log_frequency': 1000,
 }
 
 default_values_nmz = {
     'logdir': '../log',
+    'restore': False,
     'val': False,
-    'batch_size': 4000,
+    'batch_size': 2000,
     'test_batch_size': 2000,
     'learning_rate': 1e-4,
     'dataset': 'criteo_9d',

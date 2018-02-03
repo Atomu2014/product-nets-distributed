@@ -20,8 +20,8 @@ from print_hook import PrintHook
 
 FLAGS = tf.app.flags.FLAGS
 # Flags for defining the tf.train.ClusterSpec
-tf.app.flags.DEFINE_string('ps_hosts', 'localhost:12445', 'Comma-separated list of hostname:port pairs')
-tf.app.flags.DEFINE_string('worker_hosts', 'localhost:12446,localhost:12447',
+tf.app.flags.DEFINE_string('ps_hosts', 'localhost:12545', 'Comma-separated list of hostname:port pairs')
+tf.app.flags.DEFINE_string('worker_hosts', 'localhost:12546,localhost:12547',
                            'Comma-separated list of hostname:port pairs')
 
 # Flags for defining the tf.train.Server
@@ -47,10 +47,10 @@ tf.app.flags.DEFINE_string('nn_layers', '[["full", 100], ["act", "relu"], ["full
 # e.g. [["full", 5], ["act", "relu"], ["drop", 0.9], ["full", 1]]
 tf.app.flags.DEFINE_string('sub_nn_layers', '', 'Sub-network structure')
 
-# tf.app.flags.DEFINE_integer('max_step', 1000, 'Number of max steps')
+tf.app.flags.DEFINE_integer('max_step', 1000, 'Number of max steps')
 tf.app.flags.DEFINE_integer('max_data', 0, 'Number of instances')
 tf.app.flags.DEFINE_integer('num_rounds', 1, 'Number of training rounds')
-tf.app.flags.DEFINE_integer('eval_level', 1, 'Evaluating frequency in one round')
+tf.app.flags.DEFINE_integer('eval_level', 0, 'Evaluating frequency in one round')
 tf.app.flags.DEFINE_integer('log_frequency', 100, 'Logging frequency')
 
 
@@ -202,16 +202,31 @@ def main(_):
             start_time = time.time()
             num_steps = int(np.ceil(dataset.train_size / FLAGS.batch_size / FLAGS.workers))
             print('%d rounds, %d steps per round' % (FLAGS.num_rounds, num_steps))
+            flag = False
             for r in range(FLAGS.num_rounds):
                 for batch_xs, batch_ys in train_gen:
+                    if sv.should_stop():
+                        flag = True
+                        print('should stop', sv.should_stop())
+                        break
                     if FLAGS.sync:
-                        if step * FLAGS.batch_size * FLAGS.workers == 1000000:
-                            print('Finish')
-                            exit(0)
+                        if FLAGS.max_data and step * FLAGS.batch_size * FLAGS.workers >= FLAGS.max_data:
+                            flag = True
+                            print('sync', 'max_data:', FLAGS.max_data, step * FLAGS.batch_size * FLAGS.workers)
+                            break
+                        if FLAGS.max_step and step * FLAGS.workers >= FLAGS.max_step:
+                            flag = True
+                            print('sync', 'max step:', FLAGS.max_step, step * FLAGS.workers)
+                            break
                     else:
-                        if step * FLAGS.batch_size == 1000000:
-                            print('Finish')
-                            exit(0)
+                        if FLAGS.max_data and step * FLAGS.batch_size >= FLAGS.max_data:
+                            flag = True
+                            print('async', 'max_data:', FLAGS.max_data, step * FLAGS.batch_size)
+                            break
+                        if FLAGS.max_step and step >= FLAGS.max_step:
+                            flag = True
+                            print('async', 'max step:', FLAGS.max_step, step)
+                            break
                     train_feed = {model.inputs: batch_xs, model.labels: batch_ys}
                     if model.training is not None:
                         train_feed[model.training] = True
@@ -239,10 +254,12 @@ def main(_):
                                     value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
                                            tf.Summary.Value(tag='auc', simple_value=_auc_)])
                                 valid_writer.add_summary(summary, global_step=step)
+                if flag:
+                    break
                 if FLAGS.task_index == 0:
                     saver.save(sess, os.path.join(logdir, 'checkpoints', 'model.ckpt'), step)
 
-            if FLAGS.task_index == 0:
+            if not flag and FLAGS.task_index == 0:
                 _log_loss_, _auc_ = model.eval(test_gen, sess)
                 summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
                                             tf.Summary.Value(tag='auc', simple_value=_auc_)])
@@ -253,7 +270,6 @@ def main(_):
             # sess.run(q.enqueue(1))
             for op in enq_ops:
                 sess.run(op)
-
         # Ask for all the services to stop.
         sv.stop()
 

@@ -19,9 +19,11 @@ from tf_models import as_model
 from print_hook import PrintHook
 
 default_values = __init__.config['default']
+config = {}
 
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('logdir', default_values['logdir'], 'Directory for storing mnist data')
+tf.app.flags.DEFINE_bool('restore', default_values['restore'], 'Restore from logdir')
 tf.app.flags.DEFINE_bool('val', default_values['val'], 'If True, use validation set, else use test set')
 tf.app.flags.DEFINE_integer('batch_size', default_values['batch_size'], 'Training batch size')
 tf.app.flags.DEFINE_integer('test_batch_size', default_values['test_batch_size'], 'Testing batch size')
@@ -46,6 +48,53 @@ tf.app.flags.DEFINE_integer('eval_level', default_values['eval_level'], 'Evaluat
 tf.app.flags.DEFINE_integer('log_frequency', default_values['log_frequency'], 'Logging frequency')
 
 
+def add_config_to_json():
+    for k, v in FLAGS.__flags.iteritems():
+        config[k] = getattr(FLAGS, k)
+    for k, v in __init__.config.iteritems():
+        if k != 'default':
+            config[k] = v
+
+
+def get_logdir():
+    if FLAGS.restore:
+        logdir = FLAGS.logdir
+    else:
+        logdir = '%s/%s/%s/%s' % (
+            FLAGS.logdir, FLAGS.dataset, FLAGS.model, datetime.utcnow().strftime('%Y-%m-%d-%H-%M-%S'))
+    if not os.path.exists(logdir):
+        os.makedirs(logdir)
+    logfile = open(logdir + '/log', 'a')
+    return logdir, logfile
+
+
+def redirect_stdout(logfile):
+    def MyHookOut(text):
+        logfile.write(text)
+        logfile.flush()
+        return 1, 0, text
+
+    phOut = PrintHook()
+    phOut.Start(MyHookOut)
+
+
+def add_param_to_json(params):
+    for k, v in params.iteritems():
+        config[k] = v
+
+
+def dump_config(logdir):
+    config_json = json.dumps(config, indent=4, sort_keys=True, separators=(',', ':'))
+    print(config_json)
+    path_json = os.path.join(logdir, 'config.json')
+    cnt = 1
+    while os.path.exists(path_json):
+        path_json = os.path.join(logdir, 'config%d.json' % cnt)
+        cnt += 1
+    print('Config json file:', path_json)
+    open(path_json, 'w').write(config_json)
+
+
 def get_optimizer(opt, lr, **kwargs):
     opt = opt.lower()
     eps = kwargs['epsilon'] if 'epsilon' in kwargs else 1e-8
@@ -58,25 +107,9 @@ def get_optimizer(opt, lr, **kwargs):
 
 
 def main(_):
-    _config_ = {}
-    for k, v in FLAGS.__flags.iteritems():
-        _config_[k] = getattr(FLAGS, k)
-    for k, v in __init__.config.iteritems():
-        if k != 'default':
-            _config_[k] = v
-    logdir = '%s/%s/%s/%s' % (FLAGS.logdir, FLAGS.dataset, FLAGS.model, datetime.utcnow().strftime('%Y-%m-%d-%H-%M-%S'))
-    if not os.path.exists(logdir):
-        os.makedirs(logdir)
-    logfile = open(logdir + '/log', 'a')
-    _config_['logdir'] = logdir
+    logdir, logfile = get_logdir()
 
-    def MyHookOut(text):
-        logfile.write(text)
-        logfile.flush()
-        return 1, 0, text
-
-    phOut = PrintHook()
-    phOut.Start(MyHookOut)
+    redirect_stdout(logfile)
 
     train_data_param = {
         'gen_type': 'train',
@@ -96,15 +129,9 @@ def main(_):
         'batch_size': FLAGS.test_batch_size,
         'squeeze_output': False,
     }
-    dataset = as_dataset(FLAGS.dataset)
-    _config_['train_data_param'] = train_data_param
-    _config_['valid_data_param'] = valid_data_param
-    _config_['test_data_param'] = test_data_param
-    _config_json_ = json.dumps(_config_, indent=4, sort_keys=True, separators=(',', ':'))
-    print(_config_json_)
-    open(logdir + '/config.json', 'w').write(_config_json_)
 
-    tf.reset_default_graph()
+    dataset = as_dataset(FLAGS.dataset)
+
     model_param = {'l2_scale': FLAGS.l2_scale}
     if FLAGS.model != 'lr':
         model_param['embed_size'] = FLAGS.embed_size
@@ -112,42 +139,62 @@ def main(_):
         model_param['nn_layers'] = [tuple(x) for x in json.loads(FLAGS.nn_layers)]
     if FLAGS.model in ['nfm', 'pin']:
         model_param['sub_nn_layers'] = [tuple(x) for x in json.loads(FLAGS.sub_nn_layers)]
-    model = as_model(FLAGS.model, input_dim=dataset.num_features, num_fields=dataset.num_fields, **model_param)
-    # summary_op = tf.summary.merge_all()
 
-    config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False, )
-    config.gpu_options.allow_growth = True
-    sess = tf.Session(config=config)
+    add_config_to_json()
+
+    add_param_to_json({'train_data_param': train_data_param, 'valid_data_param': valid_data_param,
+                       'test_data_param': test_data_param, 'logdir': logdir})
+
+    dump_config(logdir)
+
+    tf.reset_default_graph()
+
+    model = as_model(FLAGS.model, input_dim=dataset.num_features, num_fields=dataset.num_fields, **model_param)
+
+    gpu_config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False, )
+    gpu_config.gpu_options.allow_growth = True
+    sess = tf.Session(config=gpu_config)
     global_step = tf.Variable(1, name='global_step', trainable=False)
-    # learning_rate = tf.placeholder(name='learning_rate', dtype=tf.float32)
-    # train_op = tf.train.AdagradOptimizer(FLAGS.learning_rate).minimize(model.loss, global_step=global_step)
     opt = get_optimizer(FLAGS.optimizer, FLAGS.learning_rate)
     train_op = opt.minimize(model.loss, global_step=global_step)
     saver = tf.train.Saver()
 
     train_gen = dataset.batch_generator(train_data_param)
     test_gen = dataset.batch_generator(test_data_param)
-    # valid_gen = dataset.batch_generator(valid_data_param) if FLAGS.val else test_gen
     valid_gen = dataset.batch_generator(valid_data_param if FLAGS.val else test_data_param)
     train_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'train'), graph=sess.graph, flush_secs=30)
     test_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'test'), graph=sess.graph, flush_secs=30)
-    # valid_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'valid'), graph=sess.graph,
-    #                                      flush_secs=30) if FLAGS.val else test_writer
-    valid_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'valid'),
-                                         graph=sess.graph,
-                                         flush_secs=30)
-    tf.global_variables_initializer().run(session=sess)
+    valid_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'valid'), graph=sess.graph, flush_secs=30)
 
-    step = 1
+    if not FLAGS.restore:
+        tf.global_variables_initializer().run(session=sess)
+        tf.local_variables_initializer().run(session=sess)
+    else:
+        checkpoint_state = tf.train.get_checkpoint_state(os.path.join(logdir, 'checkpoints'))
+        if checkpoint_state and checkpoint_state.model_checkpoint_path:
+            saver.restore(sess, checkpoint_state.model_checkpoint_path)
+            print('Restore model from:', checkpoint_state.model_checkpoint_path)
+            print('Run initial evaluation...')
+            model.eval(test_gen, sess)
+        else:
+            print('Restore failed')
+
+    begin_step = global_step.eval(sess)
+    step = begin_step
     start_time = time.time()
     num_steps = int(np.ceil(dataset.train_size / FLAGS.batch_size))
     eval_steps = int(np.ceil(num_steps / FLAGS.eval_level)) if FLAGS.eval_level else 0
-    print('%d rounds, %d steps per round' % (FLAGS.num_rounds, num_steps))
+    print('%d rounds in total, One round = %d steps, One evaluation = %d steps' %
+          (FLAGS.num_rounds, num_steps, eval_steps))
     for r in range(1, FLAGS.num_rounds + 1):
+        print('Round: %d' % r)
         for batch_xs, batch_ys in train_gen:
-            if FLAGS.max_data and FLAGS.max_data <= step * FLAGS.batch_size:
-                print('Finish %d, Elapsed: %.4f' % (step * FLAGS.batch_size, time.time() - start_time))
+            if (FLAGS.max_data and FLAGS.max_data <= step * FLAGS.batch_size) or \
+                    (FLAGS.max_step and FLAGS.max_step <= step):
+                print('Finish %d steps, Finish %d instances, Elapsed: %.4f' %
+                      (step, step * FLAGS.batch_size, time.time() - start_time))
                 exit(0)
+
             train_feed = {model.inputs: batch_xs, model.labels: batch_ys}
             if model.training is not None:
                 train_feed[model.training] = True
@@ -163,24 +210,26 @@ def main(_):
                                             tf.Summary.Value(tag='l2_loss', simple_value=_l2_loss_)])
                 train_writer.add_summary(summary, global_step=step)
 
-            if r < FLAGS.num_rounds - 1 or step % num_steps:
-                if FLAGS.eval_level and (step % eval_steps == 0 or step % num_steps == 0):
-                    elapsed_time = time.time() - start_time
-                    eta = FLAGS.num_rounds * num_steps / step * elapsed_time
-                    print('Round: %d, Eval: %d / %d, AvgTime: %3.2fms, Elapsed: %.2fs, ETA: %s' %
-                          (r, step // eval_steps % FLAGS.eval_level, FLAGS.eval_level,
-                           float(elapsed_time * 1000 / step), elapsed_time, str(timedelta(seconds=eta))))
-                    _log_loss_, _auc_ = model.eval(valid_gen, sess)
-                    summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
-                                                tf.Summary.Value(tag='auc', simple_value=_auc_)])
-                    valid_writer.add_summary(summary, global_step=step)
+            if (r < FLAGS.num_rounds - 1 or step % num_steps) and FLAGS.eval_level and \
+                    (step % eval_steps == 0 or step % num_steps == 0):
+                elapsed_time = time.time() - start_time
+                eta = FLAGS.num_rounds * num_steps / (step - begin_step) * elapsed_time
+                eval_times = step // eval_steps % FLAGS.eval_level
+                print('Round: %d, Eval: %d / %d, AvgTime: %3.2fms, Elapsed: %.2fs, ETA: %s' %
+                      (r, eval_times if eval_times else FLAGS.eval_level, FLAGS.eval_level,
+                       float(elapsed_time * 1000 / step), elapsed_time, str(timedelta(seconds=eta))))
+                _log_loss_, _auc_ = model.eval(valid_gen, sess)
+                summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
+                                            tf.Summary.Value(tag='auc', simple_value=_auc_)])
+                valid_writer.add_summary(summary, global_step=step)
         saver.save(sess, os.path.join(logdir, 'checkpoints', 'model.ckpt'), step)
-        print('Round: %d' % r)
-        _log_loss_, _auc_ = model.eval(test_gen, sess)
-        summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
-                                    tf.Summary.Value(tag='auc', simple_value=_auc_)])
-        test_writer.add_summary(summary, global_step=step)
-        print('Total Time: %3.2fs' % float(time.time() - start_time))
+        if FLAGS.eval_level < 1:
+            print('Round %d finished, Elapsed: %s' % (r, str(timedelta(seconds=(time.time() - start_time)))))
+    _log_loss_, _auc_ = model.eval(test_gen, sess)
+    summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
+                                tf.Summary.Value(tag='auc', simple_value=_auc_)])
+    test_writer.add_summary(summary, global_step=step)
+    print('Total Time: %s, Logdir: %s' % (str(timedelta(seconds=(time.time() - start_time))), logdir))
 
 
 if __name__ == '__main__':

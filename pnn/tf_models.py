@@ -1,9 +1,12 @@
 from __future__ import division
 from __future__ import print_function
 
+import time
+from datetime import timedelta
+
 import numpy as np
-from sklearn.metrics import log_loss, roc_auc_score
 import tensorflow as tf
+from sklearn.metrics import log_loss, roc_auc_score
 
 WEIGHTS = [tf.GraphKeys.GLOBAL_VARIABLES, tf.GraphKeys.WEIGHTS]
 BIASES = [tf.GraphKeys.GLOBAL_VARIABLES, tf.GraphKeys.BIASES]
@@ -348,6 +351,7 @@ class Model:
     def eval(self, gen, sess):
         labels = []
         preds = []
+        start_time = time.time()
         for xs, ys in gen:
             feed = {self.inputs: xs, self.labels: ys}
             if self.training is not None:
@@ -362,7 +366,8 @@ class Model:
         preds[preds > 1 - eps] = 1 - eps
         _loss_ = log_loss(y_true=labels, y_pred=preds)
         _auc_ = roc_auc_score(y_true=labels, y_score=preds)
-        print('%s-Loss: %2.4f, AUC: %2.4f' % (gen.gen_type.capitalize(), _loss_, _auc_))
+        print('%s-Loss: %2.4f, AUC: %2.4f, Elapsed: %s' %
+              (gen.gen_type.capitalize(), _loss_, _auc_, str(timedelta(seconds=(time.time() - start_time)))))
         return _loss_, _auc_
 
 
