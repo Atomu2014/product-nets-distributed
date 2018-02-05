@@ -108,7 +108,7 @@ def main(_):
             'task_index': FLAGS.task_index,
         }
         valid_data_param = {
-            'gen_type': 'valid',
+            'gen_type': 'valid' if FLAGS.val else 'test',
             'random_sample': False,
             'batch_size': FLAGS.test_batch_size,
             'squeeze_output': False,
@@ -122,7 +122,7 @@ def main(_):
         dataset = as_dataset(FLAGS.dataset)
         train_gen = dataset.batch_generator(train_data_param)
         test_gen = dataset.batch_generator(test_data_param)
-        valid_gen = dataset.batch_generator(valid_data_param) if FLAGS.val else test_gen
+        valid_gen = dataset.batch_generator(valid_data_param)
         _config_['train_data_param'] = train_data_param
         _config_['valid_data_param'] = valid_data_param
         _config_['test_data_param'] = test_data_param
@@ -200,8 +200,10 @@ def main(_):
             # Loop until the supervisor shuts down or 100000 steps have completed.
             step = 1
             start_time = time.time()
-            num_steps = int(np.ceil(dataset.train_size / FLAGS.batch_size / FLAGS.workers))
-            print('%d rounds, %d steps per round' % (FLAGS.num_rounds, num_steps))
+            num_steps = int(np.ceil(dataset.train_size * 1.0 / FLAGS.batch_size / FLAGS.workers))
+            eval_steps = int(np.ceil(num_steps * 1.0 / FLAGS.eval_level)) if FLAGS.eval_level else 0
+            print('%d rounds in total, One round = %d steps, One evaluation = %d steps' %
+                  (FLAGS.num_rounds, num_steps, eval_steps))
             flag = False
             for r in range(FLAGS.num_rounds):
                 for batch_xs, batch_ys in train_gen:
@@ -245,10 +247,7 @@ def main(_):
                             train_writer.add_summary(summary, global_step=step)
 
                     if FLAGS.task_index == 0:
-                        if r < FLAGS.num_rounds - 1 or step % num_steps:
-                            if FLAGS.eval_level and (
-                                                step % int(
-                                                np.ceil(num_steps / FLAGS.eval_level)) == 0 or step % num_steps == 0):
+                        if FLAGS.eval_level and step % num_steps % eval_steps == 0:
                                 _log_loss_, _auc_ = model.eval(valid_gen, sess)
                                 summary = tf.Summary(
                                     value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),

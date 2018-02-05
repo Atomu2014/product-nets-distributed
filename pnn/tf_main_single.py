@@ -118,7 +118,7 @@ def main(_):
         'squeeze_output': False,
     }
     valid_data_param = {
-        'gen_type': 'valid',
+        'gen_type': 'valid' if FLAGS.val else 'test',
         'random_sample': False,
         'batch_size': FLAGS.test_batch_size,
         'squeeze_output': False,
@@ -161,7 +161,7 @@ def main(_):
 
     train_gen = dataset.batch_generator(train_data_param)
     test_gen = dataset.batch_generator(test_data_param)
-    valid_gen = dataset.batch_generator(valid_data_param if FLAGS.val else test_data_param)
+    valid_gen = dataset.batch_generator(valid_data_param)
     train_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'train'), graph=sess.graph, flush_secs=30)
     test_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'test'), graph=sess.graph, flush_secs=30)
     valid_writer = tf.summary.FileWriter(logdir=os.path.join(logdir, 'valid'), graph=sess.graph, flush_secs=30)
@@ -210,14 +210,13 @@ def main(_):
                                             tf.Summary.Value(tag='l2_loss', simple_value=_l2_loss_)])
                 train_writer.add_summary(summary, global_step=step)
 
-            if (r < FLAGS.num_rounds - 1 or step % num_steps) and FLAGS.eval_level and \
-                    (step % eval_steps == 0 or step % num_steps == 0):
+            if FLAGS.eval_level and step % num_steps % eval_steps == 0:
                 elapsed_time = time.time() - start_time
                 eta = FLAGS.num_rounds * num_steps / (step - begin_step) * elapsed_time
-                eval_times = step // eval_steps % FLAGS.eval_level
+                eval_times = step % num_steps // eval_steps
                 print('Round: %d, Eval: %d / %d, AvgTime: %3.2fms, Elapsed: %.2fs, ETA: %s' %
-                      (r, eval_times if eval_times else FLAGS.eval_level, FLAGS.eval_level,
-                       float(elapsed_time * 1000 / step), elapsed_time, str(timedelta(seconds=eta))))
+                      (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / step), elapsed_time,
+                       str(timedelta(seconds=eta))))
                 _log_loss_, _auc_ = model.eval(valid_gen, sess)
                 summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
                                             tf.Summary.Value(tag='auc', simple_value=_auc_)])

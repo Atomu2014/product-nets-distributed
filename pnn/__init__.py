@@ -69,5 +69,3 @@ default_values_nmz = {
     'eval_level': 5,
     'log_frequency': 1000,
 }
-
-config['default'] = default_values_nmz
