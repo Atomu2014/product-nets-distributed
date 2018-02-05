@@ -286,8 +286,8 @@ class Model:
             self.h = self.nn_input
             h_dim = nn_input_dim
             for l_type, l_param in self.nn_layers:
-                assert l_type in {'full', 'act', 'drop', 'conv',
-                                  'flat'}, 'a layer should be {full, act, drop, conv, flat}'
+                assert l_type in {'full', 'act', 'drop', 'conv', 'flat', 'ln', 'bn'}, \
+                    'a layer should be {full, act, drop, conv, flat, ln, bn}'
                 if l_type == 'full':
                     with tf.name_scope('layer') as scope:
                         wi = tf.Variable(get_init_value(init_type=self.init_type, shape=[h_dim, l_param]), name='w',
@@ -316,6 +316,30 @@ class Model:
                     with tf.name_scope(scope):
                         h_dim = np.prod(np.array(self.h.get_shape().as_list())[list(l_param)])
                         self.h = tf.reshape(self.h, [-1, h_dim])
+                elif l_type == 'ln':
+                    with tf.name_scope(scope):
+                        with tf.name_scope('layer_norm'):
+                            layer_mean, layer_var = tf.nn.moments(self.h, axes=[1], keep_dims=True)
+                            scale = tf.Variable(get_init_value(init_type=1., shape=[h_dim]), name='scale', dtype=dtype,
+                                                collections=WEIGHTS)
+                            self.h = (self.h - layer_mean) / tf.sqrt(layer_var)
+                            self.h = self.h * scale
+                            if l_param != 'no_bias':
+                                shift = tf.Variable(get_init_value(init_type=0., shape=[h_dim]), name='shift',
+                                                    dtype=dtype, collections=BIASES)
+                                self.h = self.h + shift
+                elif l_type == 'bn':
+                    with tf.name_scope(scope):
+                        with tf.name_scope('batch_norm'):
+                            batch_mean, batch_var = tf.nn.moments(self.h, axes=[0], keep_dims=True)
+                            scale = tf.Variable(get_init_value(init_type=1., shape=[h_dim]), name='scale', dtype=dtype,
+                                                collections=WEIGHTS)
+                            self.h = (self.h - batch_mean) / tf.sqrt(batch_var)
+                            self.h = self.h * scale
+                            if l_param != 'no_bias':
+                                shift = tf.Variable(get_init_value(init_type=0., shape=[h_dim]), name='shift',
+                                                    dtype=dtype, collections=BIASES)
+                                self.h = self.h + shift
 
     def def_sub_nn_layers(self, sub_nn_input_dim=None, sub_nn_num=None, dtype=tf.float32):
         assert hasattr(self, 'sub_nn_input'), 'self.sub_nn_input not found'
@@ -330,7 +354,7 @@ class Model:
             sh_dim = sub_nn_input_dim
             sh_num = sub_nn_num
             for sl_type, sl_param in self.sub_nn_layers:
-                assert sl_type in {'full', 'act', 'drop'}, 'a layer should be {full, act, drop}'
+                assert sl_type in {'full', 'act', 'drop', 'ln', 'bn'}, 'a layer should be {full, act, drop, ln, bn}'
                 if sl_type == 'full':
                     with tf.name_scope('layer') as scope:
                         wi = tf.Variable(get_init_value(init_type=self.init_type, shape=[sh_num, sh_dim, sl_param]),
@@ -345,6 +369,32 @@ class Model:
                 elif sl_type == 'drop':
                     with tf.name_scope(scope):
                         self.sh = tf.nn.dropout(self.sh, tf.where(self.training, sl_param, 1.))
+                elif sl_type == 'ln':
+                    with tf.name_scope(scope):
+                        with tf.name_scope('layer_norm'):
+                            layer_mean, layer_var = tf.nn.moments(self.sh, axes=[0, 2], keep_dims=True)
+                            out_dim = [sh_num, 1, sh_dim] if 'no_share' in sl_param else [sh_dim]
+                            scale = tf.Variable(get_init_value(init_type=1., shape=out_dim), name='scale',
+                                                dtype=dtype, collections=WEIGHTS)
+                            self.sh = (self.sh - layer_mean) / tf.sqrt(layer_var)
+                            self.sh = self.sh * scale
+                            if 'no_bias' not in sl_param:
+                                shift = tf.Variable(get_init_value(init_type=0., shape=out_dim),
+                                                    name='shift', dtype=dtype, collections=BIASES)
+                                self.sh = self.sh + shift
+                elif sl_type == 'bn':
+                    with tf.name_scope(scope):
+                        with tf.name_scope('batch_norm'):
+                            batch_mean, batch_var = tf.nn.moments(self.sh, axes=[0, 1], keep_dims=True)
+                            out_dim = [sh_num, 1, sh_dim] if 'no_share' in sl_param else [sh_dim]
+                            scale = tf.Variable(get_init_value(init_type=1., shape=out_dim), name='scale',
+                                                dtype=dtype, collections=WEIGHTS)
+                            self.sh = (self.sh - batch_mean) / tf.sqrt(batch_var)
+                            self.sh = self.sh * scale
+                            if 'no_bias' not in sl_param:
+                                shift = tf.Variable(get_init_value(init_type=0., shape=out_dim),
+                                                    name='shift', dtype=dtype, collections=BIASES)
+                                self.sh = self.sh + shift
             # pair * batch * m -> batch * pair * m
             self.sh = tf.transpose(self.sh, [1, 0, 2])
 

@@ -18,7 +18,7 @@ from datasets import as_dataset
 from tf_models import as_model
 from print_hook import PrintHook
 
-default_values = __init__.config['default']
+default_values = __init__.default_values_nmz
 config = {}
 
 FLAGS = tf.app.flags.FLAGS
@@ -213,7 +213,7 @@ def main(_):
             if FLAGS.eval_level and step % num_steps % eval_steps == 0:
                 elapsed_time = time.time() - start_time
                 eta = FLAGS.num_rounds * num_steps / (step - begin_step) * elapsed_time
-                eval_times = step % num_steps // eval_steps
+                eval_times = step % num_steps // eval_steps or FLAGS.eval_level
                 print('Round: %d, Eval: %d / %d, AvgTime: %3.2fms, Elapsed: %.2fs, ETA: %s' %
                       (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / step), elapsed_time,
                        str(timedelta(seconds=eta))))
