@@ -21,8 +21,8 @@ from tf_models_share_vars import as_model
 default_values = __init__.default_values_nmz
 
 FLAGS = tf.app.flags.FLAGS
-tf.app.flags.DEFINE_string('ps_hosts', 'localhost:12545', 'Comma-separated list of hostname:port pairs')
-tf.app.flags.DEFINE_string('worker_hosts', 'localhost:12546,localhost:12547',
+tf.app.flags.DEFINE_string('ps_hosts', '172.16.2.245:50031', 'Comma-separated list of hostname:port pairs')
+tf.app.flags.DEFINE_string('worker_hosts', '172.16.2.239:50005,172.16.2.246:50012',
                            'Comma-separated list of hostname:port pairs')
 tf.app.flags.DEFINE_string('worker_num_gpus', '2,2', 'Comma-separated list of integers')
 tf.app.flags.DEFINE_string('job_name', '', 'One of ps, worker')
@@ -31,22 +31,23 @@ tf.app.flags.DEFINE_integer('num_ps', 1, 'Number of ps')
 tf.app.flags.DEFINE_integer('num_workers', 2, 'Number of workers')
 tf.app.flags.DEFINE_bool('distributed', True, 'Distributed training using parameter servers')
 tf.app.flags.DEFINE_bool('sync', False, 'Synchronized training')
+tf.app.flags.DEFINE_integer('num_shards', 1, 'Number of variable partitions')
 
 tf.app.flags.DEFINE_integer('num_gpus', 2, '# gpus')
-tf.app.flags.DEFINE_string('logdir', '../log/avazu/pin', 'Directory for storing mnist data')
+tf.app.flags.DEFINE_string('logdir', '../log/avazu/speed', 'Directory for storing mnist data')
 tf.app.flags.DEFINE_bool('restore', False, 'Restore from logdir')
 tf.app.flags.DEFINE_bool('val', False, 'If True, use validation set, else use test set')
-tf.app.flags.DEFINE_integer('batch_size', 2000, 'Training batch size')
+tf.app.flags.DEFINE_integer('batch_size', 10000, 'Training batch size')
 tf.app.flags.DEFINE_integer('test_batch_size', 10000, 'Testing batch size')
 tf.app.flags.DEFINE_float('learning_rate', 1e-4, 'Learning rate')
 
 tf.app.flags.DEFINE_string('dataset', 'avazu',
                            'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
-tf.app.flags.DEFINE_string('model', 'pin',
+tf.app.flags.DEFINE_string('model', 'fm',
                            'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
-tf.app.flags.DEFINE_string('optimizer', 'adam', 'Optimizer')
-tf.app.flags.DEFINE_float('l2_scale', 1e-4, 'L2 regularization')
-tf.app.flags.DEFINE_integer('embed_size', 20, 'Embedding size')
+tf.app.flags.DEFINE_string('optimizer', 'sgd', 'Optimizer')
+tf.app.flags.DEFINE_float('l2_scale', 0, 'L2 regularization')
+tf.app.flags.DEFINE_integer('embed_size', 2, 'Embedding size')
 # e.g. [["conv", [5, 10]], ["act", "relu"], ["flat", [1, 2]], ["full", 100], ["act", "relu"], ["drop", 0.5], ["full", 1]]
 tf.app.flags.DEFINE_string('nn_layers', default_values['nn_layers'], 'Network structure')
 # e.g. [["full", 5], ["act", "relu"], ["drop", 0.9], ["full", 1]]
@@ -54,8 +55,8 @@ tf.app.flags.DEFINE_string('sub_nn_layers', default_values['sub_nn_layers'], 'Su
 
 tf.app.flags.DEFINE_integer('max_step', 0, 'Number of max steps')
 tf.app.flags.DEFINE_integer('max_data', 0, 'Number of instances')
-tf.app.flags.DEFINE_integer('num_rounds', 2, 'Number of training rounds')
-tf.app.flags.DEFINE_integer('eval_level', 5, 'Evaluating frequency level')
+tf.app.flags.DEFINE_integer('num_rounds', 1, 'Number of training rounds')
+tf.app.flags.DEFINE_integer('eval_level', 0, 'Evaluating frequency level')
 tf.app.flags.DEFINE_integer('log_frequency', 100, 'Logging frequency')
 
 
@@ -102,6 +103,15 @@ def create_done_queues():
     return [create_done_queue(i) for i in range(FLAGS.num_ps)]
 
 
+def create_finish_queue(i):
+    with tf.device('/job:worker/task:%d' % (i)):
+        return tf.FIFOQueue(FLAGS.num_workers - 1, tf.int32, shared_name='done_queue' + str(i))
+
+
+def create_finish_queues():
+    return [create_finish_queue(0)]
+
+
 def is_chief_worker():
     return FLAGS.job_name == 'worker' and FLAGS.task_index == 0
 
@@ -116,6 +126,7 @@ class Trainer:
         self.logdir, self.logfile = get_logdir(FLAGS=FLAGS)
         self.ckpt_dir = os.path.join(self.logdir, 'checkpoints')
         self.ckpt_name = 'model.ckpt'
+        self.worker_dir = 'worker_%d' % FLAGS.task_index
         redirect_stdout(self.logfile)
         self.train_data_param = {
             'gen_type': 'train',
@@ -146,8 +157,6 @@ class Trainer:
                                           config=gpu_config)
             if FLAGS.job_name == 'ps':
                 print(self.server.target)
-                # TODO check this
-                self.server.join()
                 sess = tf.Session(self.server.target)
                 queue = create_done_queue(FLAGS.task_index)
                 for i in range(FLAGS.num_workers):
@@ -159,7 +168,7 @@ class Trainer:
                 self.train_data_param['num_workers'] = FLAGS.num_workers
                 self.train_data_param['task_index'] = FLAGS.task_index
 
-        self.model_param = {'l2_scale': FLAGS.l2_scale}
+        self.model_param = {'l2_scale': FLAGS.l2_scale, 'num_shards': FLAGS.num_shards}
         if FLAGS.model != 'lr':
             self.model_param['embed_size'] = FLAGS.embed_size
         if FLAGS.model in ['fnn', 'ccpm', 'deepfm', 'ipnn', 'kpnn', 'pin']:
@@ -183,7 +192,8 @@ class Trainer:
 
         with tf.device('/gpu:0'):
             num_gpus = FLAGS.num_gpus if not FLAGS.distributed else self.worker_num_gpus[FLAGS.task_index]
-            with tf.variable_scope(tf.get_variable_scope()):
+            # partitioner = tf.fixed_size_partitioner(num_shards=50)
+            with tf.variable_scope(tf.get_variable_scope()):  # , partitioner=partitioner):
                 for i in xrange(num_gpus):
                     with tf.device(device_op(i)):
                         print('Deploying gpu:%d ...' % i)
@@ -212,22 +222,34 @@ class Trainer:
                 average_grads.append(grad_and_var)
             self.train_op = self.opt.apply_gradients(average_grads, global_step=self.global_step)
             self.saver = tf.train.Saver()
-            self.enq_ops = []
-            for q in create_done_queues():
-                qop = q.enqueue(1)
-                self.enq_ops.append(qop)
+            if FLAGS.distributed:
+                self.enq_ops = []
+                for q in create_done_queues():
+                    qop = q.enqueue(1)
+                    self.enq_ops.append(qop)
+                if not is_chief_worker():
+                    for q in create_finish_queues():
+                        qop = q.enqueue(1)
+                        self.enq_ops.insert(0, qop)
+                else:
+                    chief_queue = create_finish_queue(FLAGS.task_index)
+                    self.deq_op = []
+                    for i in range(FLAGS.num_workers - 1):
+                        self.deq_op.append(chief_queue.dequeue())
 
         def sess_op():
             if not FLAGS.distributed:
                 return tf.Session(config=gpu_config)
             else:
                 return tf.train.MonitoredTrainingSession(master=self.server.target, is_chief=(FLAGS.task_index == 0),
-                                                         checkpoint_dir=self.ckpt_dir,
-                                                         chief_only_hooks=[tf.train.CheckpointSaverHook(
-                                                             checkpoint_dir=self.ckpt_dir,
-                                                             save_steps=self.num_steps,
-                                                             saver=self.saver,
-                                                             checkpoint_basename=self.ckpt_name)])
+                                                         # TODO
+                                                         # checkpoint_dir=self.ckpt_dir,
+                                                         # chief_only_hooks=[tf.train.CheckpointSaverHook(
+                                                         #     checkpoint_dir=self.ckpt_dir,
+                                                         #     save_steps=self.num_steps,
+                                                         #     saver=self.saver,
+                                                         #     checkpoint_basename=self.ckpt_name)]
+                                                         )
 
         if not FLAGS.distributed:
             num_gpus = FLAGS.num_gpus
@@ -242,14 +264,17 @@ class Trainer:
             else:
                 self.num_steps = int(np.ceil(self.dataset.train_size / FLAGS.batch_size / num_gpus))
         self.eval_steps = int(np.ceil(self.num_steps / FLAGS.eval_level)) if FLAGS.eval_level else 0
-        print('Train size = %d, Batch size = %d, GPUs = %d/%d' %
-              (self.dataset.train_size, FLAGS.batch_size, num_gpus, total_num_gpus))
-        print('%d rounds in total, One round = %d steps, One evaluation = %d steps' %
-              (FLAGS.num_rounds, self.num_steps, self.eval_steps))
 
         with sess_op() as self.sess:
+            if not FLAGS.distributed:
+                self.sess.run(tf.global_variables_initializer())
+            print('Train size = %d, Batch size = %d, GPUs = %d/%d' %
+                  (self.dataset.train_size, FLAGS.batch_size, num_gpus, total_num_gpus))
+            print('%d rounds in total, One round = %d steps, One evaluation = %d steps' %
+                  (FLAGS.num_rounds, self.num_steps, self.eval_steps))
             self.begin_step = self.global_step.eval(self.sess)
             self.step = self.begin_step
+            self.local_step = self.begin_step
             self.start_time = time.time()
 
             self.train_gen = self.dataset.batch_generator(self.train_data_param)
@@ -258,12 +283,12 @@ class Trainer:
             worker_dir = 'worker_%d' % FLAGS.task_index
             self.train_writer = tf.summary.FileWriter(logdir=os.path.join(self.logdir, 'train', worker_dir),
                                                       graph=self.sess.graph, flush_secs=30)
-            self.test_writer = tf.summary.FileWriter(logdir=os.path.join(self.logdir, 'test', worker_dir),
-                                                     graph=self.sess.graph, flush_secs=30)
-            self.valid_writer = tf.summary.FileWriter(logdir=os.path.join(self.logdir, 'valid', worker_dir),
-                                                      graph=self.sess.graph, flush_secs=30)
-            if is_monitor():
-                self.evaluate(self.test_gen, self.test_writer)
+            # self.test_writer = tf.summary.FileWriter(logdir=os.path.join(self.logdir, 'test', worker_dir),
+            #                                          graph=self.sess.graph, flush_secs=30)
+            # self.valid_writer = tf.summary.FileWriter(logdir=os.path.join(self.logdir, 'valid', worker_dir),
+            #                                           graph=self.sess.graph, flush_secs=30)
+            # if is_monitor():
+            #     self.evaluate(self.test_gen, self.test_writer)
             for r in range(1, FLAGS.num_rounds + 1):
                 print('Round: %d' % r)
                 train_iter = iter(self.train_gen)
@@ -288,7 +313,16 @@ class Trainer:
                                 train_feed[model.training] = True
                     except StopIteration:
                         break
-                    ret = self.sess.run(fetches=[self.train_op, self.global_step] + fetches, feed_dict=train_feed)
+                    # run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+                    # run_metadata = tf.RunMetadata()
+                    ret = self.sess.run(fetches=[self.train_op, self.global_step] + fetches, feed_dict=train_feed, )
+                    self.local_step += 1
+                    # options=run_options, run_metadata=run_metadata)
+                    # if is_chief_worker():
+                    #     tl = timeline.Timeline(run_metadata.step_stats)
+                    #     ctf = tl.generate_chrome_trace_format()
+                    #     with open(self.logdir + '/timeline.json', 'a') as f:
+                    #         f.write(ctf)
                     self.step = ret[1]
                     _loss_ = sum([ret[i] for i in range(2, len(ret), 3)]) / FLAGS.num_gpus
                     _log_loss_ = sum([ret[i] for i in range(3, len(ret), 3)]) / FLAGS.num_gpus
@@ -302,21 +336,35 @@ class Trainer:
                                                     tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
                                                     tf.Summary.Value(tag='l2_loss', simple_value=_l2_loss_)])
                         self.train_writer.add_summary(summary, global_step=self.step)
+                        # self.train_writer.add_run_metadata(run_metadata=run_metadata, tag='step:%d' % self.step)
 
                     if FLAGS.eval_level and self.step % self.num_steps % self.eval_steps == 0:
-                        if not FLAGS.distributed or not FLAGS.sync or is_monitor():
-                            elapsed_time = self.get_elapsed()
-                            eta = FLAGS.num_rounds * self.num_steps / (self.step - self.begin_step) * elapsed_time
-                            eval_times = self.step % self.num_steps // self.eval_steps or FLAGS.eval_level
-                            print('Round: %d, Eval: %d / %d, AvgTime: %3.2fms, Elapsed: %.2fs, ETA: %s' %
-                                  (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / self.step),
-                                   elapsed_time, self.get_timedelta(eta=eta)))
-                            self.evaluate(self.valid_gen, self.valid_writer)
+                        pass
+                        # if not FLAGS.distributed or not FLAGS.sync or is_monitor():
+                        #     elapsed_time = self.get_elapsed()
+                        #     eta = FLAGS.num_rounds * self.num_steps / (self.step - self.begin_step) * elapsed_time
+                        #     eval_times = self.step % self.num_steps // self.eval_steps or FLAGS.eval_level
+                        #     print('Round: %d, Eval: %d / %d, AvgTime: %3.2fms, Elapsed: %.2fs, ETA: %s' %
+                        #           (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / self.step),
+                        #            elapsed_time, self.get_timedelta(eta=eta)))
+                        #     self.evaluate(self.valid_gen, self.valid_writer)
+
+                    if self.local_step % FLAGS.log_frequency == 0:
+                        elapsed_time = self.get_elapsed()
+                        print('Local step %d, Elapsed: %.2fs' % (self.step, elapsed_time))
                 if not FLAGS.distributed:
-                    self.saver.save(self.sess, os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
+                    pass
+                    # self.saver.save(self.sess, os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
                 print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
             if is_monitor():
-                self.evaluate(self.test_gen, self.test_writer)
+                pass
+                # self.evaluate(self.test_gen, self.test_writer)
+            if is_chief_worker():
+                print(len(self.deq_op))
+                for q in self.deq_op:
+                    self.sess.run(q)
+                    print('Chief worker received done')
+                print('Chief worker: quitting')
             print('Total Time: %s, Logdir: %s' % (self.get_timedelta(), self.logdir))
             if FLAGS.distributed:
                 for op in self.enq_ops:
