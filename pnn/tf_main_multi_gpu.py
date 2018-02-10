@@ -22,16 +22,18 @@ default_values = __init__.default_values_nmz
 
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('ps_hosts', '172.16.2.245:50031', 'Comma-separated list of hostname:port pairs')
-tf.app.flags.DEFINE_string('worker_hosts', '172.16.2.239:50005,172.16.2.246:50012',
+tf.app.flags.DEFINE_string('worker_hosts', '172.16.2.244:50010',  # ,172.16.2.246:50012',
                            'Comma-separated list of hostname:port pairs')
-tf.app.flags.DEFINE_string('worker_num_gpus', '2,2', 'Comma-separated list of integers')
+tf.app.flags.DEFINE_string('worker_num_gpus', '2', 'Comma-separated list of integers')
 tf.app.flags.DEFINE_string('job_name', '', 'One of ps, worker')
 tf.app.flags.DEFINE_integer('task_index', 0, 'Index of task within the job')
 tf.app.flags.DEFINE_integer('num_ps', 1, 'Number of ps')
-tf.app.flags.DEFINE_integer('num_workers', 2, 'Number of workers')
+tf.app.flags.DEFINE_integer('num_workers', 1, 'Number of workers')
 tf.app.flags.DEFINE_bool('distributed', True, 'Distributed training using parameter servers')
 tf.app.flags.DEFINE_bool('sync', False, 'Synchronized training')
 tf.app.flags.DEFINE_integer('num_shards', 1, 'Number of variable partitions')
+tf.app.flags.DEFINE_bool('sparse_grad', True, 'Apply sparse gradient')
+tf.app.flags.DEFINE_string('caching_device', '', 'Caching device = "", "cpu", "gpu"')
 
 tf.app.flags.DEFINE_integer('num_gpus', 2, '# gpus')
 tf.app.flags.DEFINE_string('logdir', '../log/avazu/speed', 'Directory for storing mnist data')
@@ -43,7 +45,7 @@ tf.app.flags.DEFINE_float('learning_rate', 1e-4, 'Learning rate')
 
 tf.app.flags.DEFINE_string('dataset', 'avazu',
                            'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
-tf.app.flags.DEFINE_string('model', 'fm',
+tf.app.flags.DEFINE_string('model', 'lr',
                            'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
 tf.app.flags.DEFINE_string('optimizer', 'sgd', 'Optimizer')
 tf.app.flags.DEFINE_float('l2_scale', 0, 'L2 regularization')
@@ -126,7 +128,7 @@ class Trainer:
         self.logdir, self.logfile = get_logdir(FLAGS=FLAGS)
         self.ckpt_dir = os.path.join(self.logdir, 'checkpoints')
         self.ckpt_name = 'model.ckpt'
-        self.worker_dir = 'worker_%d' % FLAGS.task_index
+        self.worker_dir = 'worker_%d' % FLAGS.task_index if (FLAGS.distributed and not FLAGS.sync) else ''
         redirect_stdout(self.logfile)
         self.train_data_param = {
             'gen_type': 'train',
@@ -146,6 +148,9 @@ class Trainer:
             'batch_size': FLAGS.test_batch_size,
             'squeeze_output': False,
         }
+        self.train_logdir = os.path.join(self.logdir, 'train', self.worker_dir)
+        self.valid_logdir = os.path.join(self.logdir, 'valid', self.worker_dir)
+        self.test_logdir = os.path.join(self.logdir, 'test', self.worker_dir)
         gpu_config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False)
         gpu_config.gpu_options.allow_growth = True
         if FLAGS.distributed:
@@ -159,6 +164,7 @@ class Trainer:
                 print(self.server.target)
                 sess = tf.Session(self.server.target)
                 queue = create_done_queue(FLAGS.task_index)
+                print('PS %d: waiting %d workers to finish' % (FLAGS.task_index, FLAGS.num_workers))
                 for i in range(FLAGS.num_workers):
                     sess.run(queue.dequeue())
                     print('PS %d received done %d' % (FLAGS.task_index, i))
@@ -193,13 +199,26 @@ class Trainer:
         with tf.device('/gpu:0'):
             num_gpus = FLAGS.num_gpus if not FLAGS.distributed else self.worker_num_gpus[FLAGS.task_index]
             # partitioner = tf.fixed_size_partitioner(num_shards=50)
-            with tf.variable_scope(tf.get_variable_scope()):  # , partitioner=partitioner):
+            # TODO check cache device and partitioner
+            if FLAGS.caching_device == '':
+                caching_device = None
+            elif FLAGS.caching_device == 'cpu':
+                caching_device = '/cpu:0'
+            elif FLAGS.caching_device == 'gpu':
+                caching_device = '/gpu:0'
+            with tf.variable_scope(tf.get_variable_scope(),
+                                   caching_device=caching_device):  # , partitioner=partitioner):
                 for i in xrange(num_gpus):
                     with tf.device(device_op(i)):
                         print('Deploying gpu:%d ...' % i)
                         if i == 0:
                             self.global_step = tf.get_variable(name='global_step', dtype=tf.int32, shape=[],
                                                                initializer=tf.constant_initializer(1), trainable=False)
+                            # for j in range(FLAGS.num_workers):
+                            #     tf.get_variable(name='local_step_%d' % j, dtype=tf.int32,
+                            #                                  shape=[], initializer=tf.constant_initializer(1),
+                            #                                  trainable=False)
+                            # self.local_step =
                             self.opt = get_optimizer(FLAGS.optimizer, FLAGS.learning_rate)
                         with tf.name_scope('tower_%d' % i):
                             model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
@@ -210,23 +229,64 @@ class Trainer:
                             grads = self.opt.compute_gradients(model.loss)
                             self.tower_grads.append(grads)
             average_grads = []
+
+            def grads_mean(grads_and_vars):
+                indices = []
+                values = []
+                dense_shape = grads_and_vars[0][0].dense_shape
+                n = len(grads_and_vars)
+                for g, _ in grads_and_vars:
+                    indices.append(g.indices)
+                    values.append(g.values / n)
+                indices = tf.concat(indices, axis=0)
+                values = tf.concat(values, axis=0)
+                return tf.IndexedSlices(indices=indices, values=values, dense_shape=dense_shape)
+
+            print('###################################')
             for grad_and_vars in zip(*self.tower_grads):
                 grads = []
-                for g, _ in grad_and_vars:
-                    expanded_g = tf.expand_dims(g, 0)
-                    grads.append(expanded_g)
-                grad = tf.concat(axis=0, values=grads)
-                grad = tf.reduce_mean(grad, 0)
+                # TODO check this
+                if FLAGS.sparse_grad and isinstance(grad_and_vars[0][0], tf.IndexedSlices):
+                    grad = grads_mean(grad_and_vars)
+                else:
+                    for g, _ in grad_and_vars:
+                        expanded_g = tf.expand_dims(g, 0)
+                        grads.append(expanded_g)
+                    grad = tf.concat(axis=0, values=grads)
+                    grad = tf.reduce_mean(grad, 0)
+                # for g, _ in grad_and_vars:
+                #     expanded_g = tf.expand_dims(g, 0)
+                #     grads.append(expanded_g)
+                # grad = tf.concat(axis=0, values=grads)
+                # grad = tf.reduce_mean(grad, 0)
                 v = grad_and_vars[0][1]
                 grad_and_var = (grad, v)
+                print(type(grad), type(v))
                 average_grads.append(grad_and_var)
-            self.train_op = self.opt.apply_gradients(average_grads, global_step=self.global_step)
+            print('###################################')
+            # TODO check this
+            self.grad_op = tf.group([(x[0].op, x[1].op) for x in average_grads])
+            # self.grad_op = tf.group(average_grads)
+            if not FLAGS.distributed or not FLAGS.sync:
+                self.train_op = self.opt.apply_gradients(average_grads, global_step=self.global_step)
+                self.hooks = None
+                self.chief_only_hooks = None
+            else:
+                rep_op = tf.train.SyncReplicasOptimizer(opt=self.opt, replicas_to_aggregate=FLAGS.num_workers * 1000,
+                                                        total_num_replicas=FLAGS.num_workers, use_locking=True)
+                self.train_op = rep_op.apply_gradients(grads_and_vars=average_grads, global_step=self.global_step)
+                # init_token_op = rep_op.get_init_tokens_op()
+                # chief_queue_runner = rep_op.get_chief_queue_runner()
+                # self.chief_only_hooks = [chief_queue_runner, init_token_op]
+                self.hooks = [rep_op.make_session_run_hook(is_chief_worker())]
+                self.chief_only_hooks = None
             self.saver = tf.train.Saver()
             if FLAGS.distributed:
                 self.enq_ops = []
                 for q in create_done_queues():
                     qop = q.enqueue(1)
                     self.enq_ops.append(qop)
+                # if not FLAGS.sync:
                 if not is_chief_worker():
                     for q in create_finish_queues():
                         qop = q.enqueue(1)
@@ -249,6 +309,8 @@ class Trainer:
                                                          #     save_steps=self.num_steps,
                                                          #     saver=self.saver,
                                                          #     checkpoint_basename=self.ckpt_name)]
+                                                         hooks=self.hooks,
+                                                         chief_only_hooks=self.chief_only_hooks
                                                          )
 
         if not FLAGS.distributed:
@@ -266,29 +328,42 @@ class Trainer:
         self.eval_steps = int(np.ceil(self.num_steps / FLAGS.eval_level)) if FLAGS.eval_level else 0
 
         with sess_op() as self.sess:
-            if not FLAGS.distributed:
-                self.sess.run(tf.global_variables_initializer())
             print('Train size = %d, Batch size = %d, GPUs = %d/%d' %
                   (self.dataset.train_size, FLAGS.batch_size, num_gpus, total_num_gpus))
             print('%d rounds in total, One round = %d steps, One evaluation = %d steps' %
                   (FLAGS.num_rounds, self.num_steps, self.eval_steps))
+
+            self.train_gen = self.dataset.batch_generator(self.train_data_param)
+            self.valid_gen = self.dataset.batch_generator(self.valid_data_param)
+            self.test_gen = self.dataset.batch_generator(self.test_data_param)
+
+            self.train_writer = tf.summary.FileWriter(logdir=self.train_logdir, graph=self.sess.graph, flush_secs=30)
+            self.test_writer = tf.summary.FileWriter(logdir=self.test_logdir, graph=self.sess.graph, flush_secs=30)
+            self.valid_writer = tf.summary.FileWriter(logdir=self.valid_logdir, graph=self.sess.graph, flush_secs=30)
+
+            if not FLAGS.distributed:
+                if not FLAGS.restore:
+                    self.sess.run(tf.global_variables_initializer())
+                else:
+                    checkpoint_state = tf.train.get_checkpoint_state(self.ckpt_dir)
+                    if checkpoint_state and checkpoint_state.model_checkpoint_path:
+                        self.saver.restore(self.sess, checkpoint_state.model_checkpoint_path)
+                        print('Restore model from:', checkpoint_state.model_checkpoint_path)
+                        print('Run initial evaluation...')
+                        self.evaluate(self.test_gen, self.test_writer)
+                    else:
+                        print('Restore failed')
+            else:
+                if FLAGS.restore:
+                    print('Restore model from:', self.ckpt_dir)
+                    print('Run initial evaluation...')
+                    self.evaluate(self.test_gen, self.test_writer)
+
             self.begin_step = self.global_step.eval(self.sess)
             self.step = self.begin_step
             self.local_step = self.begin_step
             self.start_time = time.time()
 
-            self.train_gen = self.dataset.batch_generator(self.train_data_param)
-            self.valid_gen = self.dataset.batch_generator(self.valid_data_param)
-            self.test_gen = self.dataset.batch_generator(self.test_data_param)
-            worker_dir = 'worker_%d' % FLAGS.task_index
-            self.train_writer = tf.summary.FileWriter(logdir=os.path.join(self.logdir, 'train', worker_dir),
-                                                      graph=self.sess.graph, flush_secs=30)
-            # self.test_writer = tf.summary.FileWriter(logdir=os.path.join(self.logdir, 'test', worker_dir),
-            #                                          graph=self.sess.graph, flush_secs=30)
-            # self.valid_writer = tf.summary.FileWriter(logdir=os.path.join(self.logdir, 'valid', worker_dir),
-            #                                           graph=self.sess.graph, flush_secs=30)
-            # if is_monitor():
-            #     self.evaluate(self.test_gen, self.test_writer)
             for r in range(1, FLAGS.num_rounds + 1):
                 print('Round: %d' % r)
                 train_iter = iter(self.train_gen)
@@ -297,10 +372,19 @@ class Trainer:
                             (FLAGS.max_step and FLAGS.max_step <= self.step):
                         print('Finish %d steps, Finish %d instances, Elapsed: %.4f' %
                               (self.step, self.step * FLAGS.batch_size, time.time() - self.start_time))
-                        if FLAGS.distributed:
-                            for op in self.enq_ops:
-                                self.sess.run(op)
+                        # TODO check
+                        # if not FLAGS.sync and is_chief_worker():
+                        #     print(len(self.deq_op))
+                        #     for q in self.deq_op:
+                        #         self.sess.run(q)
+                        #         print('Chief worker received done')
+                        #     print('Chief worker: quitting')
+                        # print('Total Time: %s, Logdir: %s' % (self.get_timedelta(), self.logdir))
+                        # if FLAGS.distributed:
+                        #     for op in self.enq_ops:
+                        #         self.sess.run(op)
                         return
+
                     fetches = []
                     train_feed = {}
                     try:
@@ -313,6 +397,7 @@ class Trainer:
                                 train_feed[model.training] = True
                     except StopIteration:
                         break
+
                     # run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                     # run_metadata = tf.RunMetadata()
                     ret = self.sess.run(fetches=[self.train_op, self.global_step] + fetches, feed_dict=train_feed, )
@@ -338,6 +423,16 @@ class Trainer:
                         self.train_writer.add_summary(summary, global_step=self.step)
                         # self.train_writer.add_run_metadata(run_metadata=run_metadata, tag='step:%d' % self.step)
 
+                    if self.local_step % FLAGS.log_frequency == 0:
+                        elapsed_time = self.get_elapsed()
+                        print('Local step %d, Elapsed: %.2fs' % (self.local_step, elapsed_time))
+                        print('Done step %d, Elapsed: %.2fs, Train-Loss: %.4f, Log-Loss: %.4f, L2-Loss: %g'
+                              % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
+                        summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=_loss_),
+                                                    tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
+                                                    tf.Summary.Value(tag='l2_loss', simple_value=_l2_loss_)])
+                        self.train_writer.add_summary(summary, global_step=self.step)
+
                     if FLAGS.eval_level and self.step % self.num_steps % self.eval_steps == 0:
                         pass
                         # if not FLAGS.distributed or not FLAGS.sync or is_monitor():
@@ -349,9 +444,6 @@ class Trainer:
                         #            elapsed_time, self.get_timedelta(eta=eta)))
                         #     self.evaluate(self.valid_gen, self.valid_writer)
 
-                    if self.local_step % FLAGS.log_frequency == 0:
-                        elapsed_time = self.get_elapsed()
-                        print('Local step %d, Elapsed: %.2fs' % (self.step, elapsed_time))
                 if not FLAGS.distributed:
                     pass
                     # self.saver.save(self.sess, os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
@@ -359,8 +451,8 @@ class Trainer:
             if is_monitor():
                 pass
                 # self.evaluate(self.test_gen, self.test_writer)
-            if is_chief_worker():
-                print(len(self.deq_op))
+            if FLAGS.distributed and is_chief_worker():
+                print('Chief worker: waiting %d workers to finish' % len(self.deq_op))
                 for q in self.deq_op:
                     self.sess.run(q)
                     print('Chief worker received done')
@@ -369,6 +461,7 @@ class Trainer:
             if FLAGS.distributed:
                 for op in self.enq_ops:
                     self.sess.run(op)
+            print('Worker %d can not exit, should be killed' % FLAGS.task_index)
 
     def get_elapsed(self):
         return time.time() - self.start_time
