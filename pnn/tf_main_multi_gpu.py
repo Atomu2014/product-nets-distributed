@@ -34,6 +34,7 @@ tf.app.flags.DEFINE_bool('sync', False, 'Synchronized training')
 tf.app.flags.DEFINE_integer('num_shards', 1, 'Number of variable partitions')
 tf.app.flags.DEFINE_bool('sparse_grad', True, 'Apply sparse gradient')
 tf.app.flags.DEFINE_string('caching_device', '', 'Caching device = "", "cpu", "gpu"')
+tf.app.flags.DEFINE_integer('lazy_update', 1, 'Number of local steps where variable update is delayed')
 
 tf.app.flags.DEFINE_integer('num_gpus', 2, '# gpus')
 tf.app.flags.DEFINE_string('logdir', '../log/avazu/speed', 'Directory for storing mnist data')
@@ -218,9 +219,9 @@ class Trainer:
                             #     tf.get_variable(name='local_step_%d' % j, dtype=tf.int32,
                             #                                  shape=[], initializer=tf.constant_initializer(1),
                             #                                  trainable=False)
-                            self.local_step = tf.get_variable(name='local_step_%d' % FLAGS.task_index, dtype=tf.int32,
-                                                              shape=[], initializer=tf.constant_initializer(1),
-                                                              trainable=False)
+                            # self.local_step = tf.get_variable(name='local_step_%d' % FLAGS.task_index, dtype=tf.int32,
+                            #                                   shape=[], initializer=tf.constant_initializer(1),
+                            #                                   trainable=False)
                             self.opt = get_optimizer(FLAGS.optimizer, FLAGS.learning_rate)
                         with tf.name_scope('tower_%d' % i):
                             model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
@@ -241,82 +242,65 @@ class Trainer:
                     values.append(g.values / n)
                 indices = tf.concat(indices, axis=0)
                 values = tf.concat(values, axis=0)
-                return tf.IndexedSlices(indices=indices, values=values, dense_shape=dense_shape)
+                return tf.IndexedSlices(values=values, indices=indices, dense_shape=dense_shape)
 
-            def sparse_grads_add(grad1, grad2):
-                indices = tf.concat([grad1.indices, grad2.indices], axis=0)
-                values = tf.concat([grad1.values, grad2.values], axis=0)
-                return tf.IndexedSlices(indices=indices, values=values, dense_shape=grad1.dense_shape)
-
-            def sparse_grads_addn(grads):
-                indices = []
-                values = []
-                dense_shape = grads[0].dense_shape
-                for grad in grads:
-                    indices.append(grad.indices)
-                    values.append(grad.values)
-                return tf.IndexedSlices(indices=indices, values=values, dense_shape=dense_shape)
+            # def sparse_grads_add(grad1, grad2):
+            #     indices = tf.concat([grad1.indices, grad2.indices], axis=0)
+            #     values = tf.concat([grad1.values, grad2.values], axis=0)
+            #     return tf.IndexedSlices(values=values, indices=indices, dense_shape=grad1.dense_shape)
+            #
+            # def sparse_grads_addn(grads):
+            #     indices = []
+            #     values = []
+            #     dense_shape = grads[0].dense_shape
+            #     for grad in grads:
+            #         indices.append(grad.indices)
+            #         values.append(grad.values)
+            #     return tf.IndexedSlices(values=values, indices=indices, dense_shape=dense_shape)
 
             average_grads = []
             local_grads = []
-            zero_grads = []
-            # accumulate_grads = []
-
-            def accumulate(index):
-                def _accumulate(new_grad):
-                    local_grads[index] = local_grads[index] + new_grad
-                return _accumulate
-
-            def sparse_accumulate(index):
-                def _accumulate(new_grad):
-                    local_grads[index] = sparse_grads_add(local_grads[index], new_grad)
-                return _accumulate
+            accumulate_op = []
+            reset_op = []
 
             print('###################################')
             for grad_and_vars in zip(*self.tower_grads):
                 grads = []
-                # TODO check this
+                # TODO test this
                 if FLAGS.sparse_grad and isinstance(grad_and_vars[0][0], tf.IndexedSlices):
                     grad = sparse_grads_mean(grad_and_vars)
+                    grad_shape = grad.dense_shape
                 else:
                     for g, _ in grad_and_vars:
                         expanded_g = tf.expand_dims(g, 0)
                         grads.append(expanded_g)
                     grad = tf.concat(axis=0, values=grads)
                     grad = tf.reduce_mean(grad, 0)
+                    grad_shape = grad.shape
                 v = grad_and_vars[0][1]
                 grad_and_var = (grad, v)
-                print(type(grad), grad.shape, type(v), v.shape)
+                print(type(grad), grad_shape, type(v), v.shape)
                 average_grads.append(grad_and_var)
-                if isinstance(grad, tf.IndexedSlices):
-                    pass
-                    # TODO: implement this
-                    # local_grad = tf.IndexedSlices(grad.indices, tf.zeros_like(grad.values), grad.dense_shape)
-                    # accumulator = sparse_accumulate(len(local_grads)-1)
-                else:
+
+                if FLAGS.lazy_update > 1:
                     zero_grad = tf.zeros_like(v)
-                    local_grad = tf.Variable(zero_grad, dtype=tf.float32,
-                                             trainable=False)
-                    # accumulator = accumulate(len(local_grads) - 1)
-                local_grads.append(local_grad)
-                zero_grads.append(zero_grad)
-                # accumulate_grads.append(accumulator)
+                    local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False)
+                    reset_grad = local_grad.assign(zero_grad)
+                    if isinstance(grad, tf.IndexedSlices):
+                        accumulate_grad = local_grad.scatter_sub(-grad)
+                    else:
+                        accumulate_grad = local_grad.assign_add(grad)
+                    local_grads.append((local_grad, v))
+                    accumulate_op.append(accumulate_grad)
+                    reset_op.append(reset_grad)
             print('###################################')
-            # TODO check this
+            # TODO test op.op
             # self.grad_op = tf.group([(x[0].op, x[1].op) for x in average_grads])
-            self.grad_op = tf.group(average_grads)
-            accumulate_op = []
-            # update_op = []
-            reset_op = []
-            local_average_grads = []
-            for i in range(len(average_grads)):
-                accumulate_op.append(local_grads[i].assign_add(average_grads[i][0]).op)
-                local_average_grads.append((local_grads[i], average_grads[i][1]))
-                # update_op.append(average_grads[i][1].assign_add(local_grads[i] / 100).op)
-                reset_op.append(local_grads[i].assign(zero_grads[i]))
-            self.accumulate_op = tf.group(accumulate_op)
-            self.update_op = self.opt.apply_gradients(local_average_grads, global_step=self.global_step)
-            self.reset_op = tf.group(reset_op)
+            if FLAGS.lazy_update > 1:
+                self.update_op = self.opt.apply_gradients(local_grads, global_step=self.global_step)
+                self.grad_op = tf.group(average_grads)
+                self.accumulate_op = tf.group(accumulate_op)
+                self.reset_op = tf.group(reset_op)
 
             if not FLAGS.distributed or not FLAGS.sync:
                 self.train_op = self.opt.apply_gradients(average_grads, global_step=self.global_step)
@@ -439,42 +423,35 @@ class Trainer:
                     except StopIteration:
                         break
 
-                    ret = self.sess.run(fetches=[self.grad_op, self.accumulate_op, self.global_step] + fetches, feed_dict=train_feed, )
-                    # grads = ret[0]
-                    # for i in range(len(grads)):
-                    #     g = grads[i][0]
-                    #     if isinstance(g, tf.IndexedSlices):
-                    #         local_grads[i] = sparse_grads_add(local_grads[i], g)
-                    #     else:
-                    #         local_grads[i] = local_grads[i] + g
+                    train_op = self.train_op if FLAGS.lazy_update <= 1 else self.accumulate_op
+                    ret = self.sess.run(fetches=[train_op, self.global_step] + fetches, feed_dict=train_feed, )
+                    # TODO use variable?
                     self.local_step += 1
-                    self.step = ret[2]
-                    _loss_ = sum([ret[i] for i in range(3, len(ret), 3)]) / FLAGS.num_gpus
-                    _log_loss_ = sum([ret[i] for i in range(4, len(ret), 3)]) / FLAGS.num_gpus
-                    _l2_loss_ = sum([ret[i] for i in range(5, len(ret), 3)]) / FLAGS.num_gpus
+                    self.step = ret[1]
+                    _loss_ = sum([ret[i] for i in range(2, len(ret), 3)]) / FLAGS.num_gpus
+                    _log_loss_ = sum([ret[i] for i in range(3, len(ret), 3)]) / FLAGS.num_gpus
+                    _l2_loss_ = sum([ret[i] for i in range(4, len(ret), 3)]) / FLAGS.num_gpus
 
-                    if self.step % FLAGS.log_frequency == 0:
-                        elapsed_time = self.get_elapsed()
-                        print('Done step %d, Elapsed: %.2fs, Train-Loss: %.4f, Log-Loss: %.4f, L2-Loss: %g'
-                              % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
-                        summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=_loss_),
-                                                    tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
-                                                    tf.Summary.Value(tag='l2_loss', simple_value=_l2_loss_)])
-                        self.train_writer.add_summary(summary, global_step=self.step)
-                        # self.train_writer.add_run_metadata(run_metadata=run_metadata, tag='step:%d' % self.step)
-
-                    if self.local_step % FLAGS.log_frequency == 0:
+                    if FLAGS.lazy_update <= 1 and self.local_step % FLAGS.log_frequency == 0:
                         elapsed_time = self.get_elapsed()
                         print('Local step %d, Elapsed: %.2fs' % (self.local_step, elapsed_time))
+
+                    if FLAGS.lazy_update > 1 and self.local_step % FLAGS.lazy_update == 0:
+                        self.sess.run(self.update_op)
+                        self.sess.run(self.reset_op)
+                        # self.evaluate(self.test_gen)
+                        elapsed_time = self.get_elapsed()
+                        print('Local step %d, Elapsed: %.2fs, Lazy update' % (self.local_step, elapsed_time))
+
+                    if self.step % FLAGS.log_frequency == 0 and (FLAGS.lazy_update <= 1 or (
+                            FLAGS.lazy_update > 1 and self.local_step % FLAGS.lazy_update == 0)):
+                        elapsed_time = self.get_elapsed()
                         print('Done step %d, Elapsed: %.2fs, Train-Loss: %.4f, Log-Loss: %.4f, L2-Loss: %g'
                               % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
                         summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=_loss_),
                                                     tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
                                                     tf.Summary.Value(tag='l2_loss', simple_value=_l2_loss_)])
                         self.train_writer.add_summary(summary, global_step=self.step)
-                        self.sess.run(self.update_op)
-                        self.evaluate(self.test_gen)
-                        self.sess.run(self.reset_op)
 
                     if FLAGS.eval_level and self.step % self.num_steps % self.eval_steps == 0:
                         pass
