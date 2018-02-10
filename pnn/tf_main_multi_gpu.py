@@ -151,8 +151,8 @@ class Trainer:
         self.train_logdir = os.path.join(self.logdir, 'train', self.worker_dir)
         self.valid_logdir = os.path.join(self.logdir, 'valid', self.worker_dir)
         self.test_logdir = os.path.join(self.logdir, 'test', self.worker_dir)
-        gpu_config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False)
-        gpu_config.gpu_options.allow_growth = True
+        gpu_config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False,
+                                    gpu_options={'allow_growth': True})
         if FLAGS.distributed:
             self.ps_hosts = FLAGS.ps_hosts.split(',')
             self.worker_hosts = FLAGS.worker_hosts.split(',')
@@ -206,8 +206,8 @@ class Trainer:
                 caching_device = '/cpu:0'
             elif FLAGS.caching_device == 'gpu':
                 caching_device = '/gpu:0'
-            with tf.variable_scope(tf.get_variable_scope(),
-                                   caching_device=caching_device):  # , partitioner=partitioner):
+            with tf.variable_scope(tf.get_variable_scope(), caching_device=caching_device):
+                # , partitioner=partitioner):
                 for i in xrange(num_gpus):
                     with tf.device(device_op(i)):
                         print('Deploying gpu:%d ...' % i)
@@ -218,7 +218,9 @@ class Trainer:
                             #     tf.get_variable(name='local_step_%d' % j, dtype=tf.int32,
                             #                                  shape=[], initializer=tf.constant_initializer(1),
                             #                                  trainable=False)
-                            # self.local_step =
+                            self.local_step = tf.get_variable(name='local_step_%d' % FLAGS.task_index, dtype=tf.int32,
+                                                              shape=[], initializer=tf.constant_initializer(1),
+                                                              trainable=False)
                             self.opt = get_optimizer(FLAGS.optimizer, FLAGS.learning_rate)
                         with tf.name_scope('tower_%d' % i):
                             model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
@@ -228,9 +230,8 @@ class Trainer:
                             tf.get_variable_scope().reuse_variables()
                             grads = self.opt.compute_gradients(model.loss)
                             self.tower_grads.append(grads)
-            average_grads = []
 
-            def grads_mean(grads_and_vars):
+            def sparse_grads_mean(grads_and_vars):
                 indices = []
                 values = []
                 dense_shape = grads_and_vars[0][0].dense_shape
@@ -242,31 +243,81 @@ class Trainer:
                 values = tf.concat(values, axis=0)
                 return tf.IndexedSlices(indices=indices, values=values, dense_shape=dense_shape)
 
+            def sparse_grads_add(grad1, grad2):
+                indices = tf.concat([grad1.indices, grad2.indices], axis=0)
+                values = tf.concat([grad1.values, grad2.values], axis=0)
+                return tf.IndexedSlices(indices=indices, values=values, dense_shape=grad1.dense_shape)
+
+            def sparse_grads_addn(grads):
+                indices = []
+                values = []
+                dense_shape = grads[0].dense_shape
+                for grad in grads:
+                    indices.append(grad.indices)
+                    values.append(grad.values)
+                return tf.IndexedSlices(indices=indices, values=values, dense_shape=dense_shape)
+
+            average_grads = []
+            local_grads = []
+            zero_grads = []
+            # accumulate_grads = []
+
+            def accumulate(index):
+                def _accumulate(new_grad):
+                    local_grads[index] = local_grads[index] + new_grad
+                return _accumulate
+
+            def sparse_accumulate(index):
+                def _accumulate(new_grad):
+                    local_grads[index] = sparse_grads_add(local_grads[index], new_grad)
+                return _accumulate
+
             print('###################################')
             for grad_and_vars in zip(*self.tower_grads):
                 grads = []
                 # TODO check this
                 if FLAGS.sparse_grad and isinstance(grad_and_vars[0][0], tf.IndexedSlices):
-                    grad = grads_mean(grad_and_vars)
+                    grad = sparse_grads_mean(grad_and_vars)
                 else:
                     for g, _ in grad_and_vars:
                         expanded_g = tf.expand_dims(g, 0)
                         grads.append(expanded_g)
                     grad = tf.concat(axis=0, values=grads)
                     grad = tf.reduce_mean(grad, 0)
-                # for g, _ in grad_and_vars:
-                #     expanded_g = tf.expand_dims(g, 0)
-                #     grads.append(expanded_g)
-                # grad = tf.concat(axis=0, values=grads)
-                # grad = tf.reduce_mean(grad, 0)
                 v = grad_and_vars[0][1]
                 grad_and_var = (grad, v)
-                print(type(grad), type(v))
+                print(type(grad), grad.shape, type(v), v.shape)
                 average_grads.append(grad_and_var)
+                if isinstance(grad, tf.IndexedSlices):
+                    pass
+                    # TODO: implement this
+                    # local_grad = tf.IndexedSlices(grad.indices, tf.zeros_like(grad.values), grad.dense_shape)
+                    # accumulator = sparse_accumulate(len(local_grads)-1)
+                else:
+                    zero_grad = tf.zeros_like(v)
+                    local_grad = tf.Variable(zero_grad, dtype=tf.float32,
+                                             trainable=False)
+                    # accumulator = accumulate(len(local_grads) - 1)
+                local_grads.append(local_grad)
+                zero_grads.append(zero_grad)
+                # accumulate_grads.append(accumulator)
             print('###################################')
             # TODO check this
-            self.grad_op = tf.group([(x[0].op, x[1].op) for x in average_grads])
-            # self.grad_op = tf.group(average_grads)
+            # self.grad_op = tf.group([(x[0].op, x[1].op) for x in average_grads])
+            self.grad_op = tf.group(average_grads)
+            accumulate_op = []
+            # update_op = []
+            reset_op = []
+            local_average_grads = []
+            for i in range(len(average_grads)):
+                accumulate_op.append(local_grads[i].assign_add(average_grads[i][0]).op)
+                local_average_grads.append((local_grads[i], average_grads[i][1]))
+                # update_op.append(average_grads[i][1].assign_add(local_grads[i] / 100).op)
+                reset_op.append(local_grads[i].assign(zero_grads[i]))
+            self.accumulate_op = tf.group(accumulate_op)
+            self.update_op = self.opt.apply_gradients(local_average_grads, global_step=self.global_step)
+            self.reset_op = tf.group(reset_op)
+
             if not FLAGS.distributed or not FLAGS.sync:
                 self.train_op = self.opt.apply_gradients(average_grads, global_step=self.global_step)
                 self.hooks = None
@@ -373,16 +424,6 @@ class Trainer:
                         print('Finish %d steps, Finish %d instances, Elapsed: %.4f' %
                               (self.step, self.step * FLAGS.batch_size, time.time() - self.start_time))
                         # TODO check
-                        # if not FLAGS.sync and is_chief_worker():
-                        #     print(len(self.deq_op))
-                        #     for q in self.deq_op:
-                        #         self.sess.run(q)
-                        #         print('Chief worker received done')
-                        #     print('Chief worker: quitting')
-                        # print('Total Time: %s, Logdir: %s' % (self.get_timedelta(), self.logdir))
-                        # if FLAGS.distributed:
-                        #     for op in self.enq_ops:
-                        #         self.sess.run(op)
                         return
 
                     fetches = []
@@ -398,20 +439,19 @@ class Trainer:
                     except StopIteration:
                         break
 
-                    # run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-                    # run_metadata = tf.RunMetadata()
-                    ret = self.sess.run(fetches=[self.train_op, self.global_step] + fetches, feed_dict=train_feed, )
+                    ret = self.sess.run(fetches=[self.grad_op, self.accumulate_op, self.global_step] + fetches, feed_dict=train_feed, )
+                    # grads = ret[0]
+                    # for i in range(len(grads)):
+                    #     g = grads[i][0]
+                    #     if isinstance(g, tf.IndexedSlices):
+                    #         local_grads[i] = sparse_grads_add(local_grads[i], g)
+                    #     else:
+                    #         local_grads[i] = local_grads[i] + g
                     self.local_step += 1
-                    # options=run_options, run_metadata=run_metadata)
-                    # if is_chief_worker():
-                    #     tl = timeline.Timeline(run_metadata.step_stats)
-                    #     ctf = tl.generate_chrome_trace_format()
-                    #     with open(self.logdir + '/timeline.json', 'a') as f:
-                    #         f.write(ctf)
-                    self.step = ret[1]
-                    _loss_ = sum([ret[i] for i in range(2, len(ret), 3)]) / FLAGS.num_gpus
-                    _log_loss_ = sum([ret[i] for i in range(3, len(ret), 3)]) / FLAGS.num_gpus
-                    _l2_loss_ = sum([ret[i] for i in range(4, len(ret), 3)]) / FLAGS.num_gpus
+                    self.step = ret[2]
+                    _loss_ = sum([ret[i] for i in range(3, len(ret), 3)]) / FLAGS.num_gpus
+                    _log_loss_ = sum([ret[i] for i in range(4, len(ret), 3)]) / FLAGS.num_gpus
+                    _l2_loss_ = sum([ret[i] for i in range(5, len(ret), 3)]) / FLAGS.num_gpus
 
                     if self.step % FLAGS.log_frequency == 0:
                         elapsed_time = self.get_elapsed()
@@ -432,6 +472,9 @@ class Trainer:
                                                     tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
                                                     tf.Summary.Value(tag='l2_loss', simple_value=_l2_loss_)])
                         self.train_writer.add_summary(summary, global_step=self.step)
+                        self.sess.run(self.update_op)
+                        self.evaluate(self.test_gen)
+                        self.sess.run(self.reset_op)
 
                     if FLAGS.eval_level and self.step % self.num_steps % self.eval_steps == 0:
                         pass
@@ -481,6 +524,7 @@ class Trainer:
         self.config['test_data_param'] = self.test_data_param
         self.config['logdir'] = self.logdir
         config_json = json.dumps(self.config, indent=4, sort_keys=True, separators=(',', ':'))
+        print('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
         print(config_json)
         path_json = os.path.join(self.logdir, 'config.json')
         cnt = 1
@@ -488,6 +532,7 @@ class Trainer:
             path_json = os.path.join(self.logdir, 'config%d.json' % cnt)
             cnt += 1
         print('Config json file:', path_json)
+        print('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
         open(path_json, 'w').write(config_json)
 
     def evaluate(self, gen, writer=None):
