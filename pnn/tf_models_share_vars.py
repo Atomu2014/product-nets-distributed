@@ -65,7 +65,7 @@ def selu(x):
 def get_act_func(act_type='relu'):
     if type(act_type) is str:
         act_type = act_type.lower()
-    assert act_type in {'sigmoid', 'softmax', 'relu', 'tanh', 'elu', 'selu', None}
+    assert act_type in {'sigmoid', 'softmax', 'relu', 'tanh', 'elu', 'selu', 'crelu', 'leacky_relu', None}
     if act_type == 'sigmoid':
         return tf.nn.sigmoid
     elif act_type == 'softmax':
@@ -78,6 +78,10 @@ def get_act_func(act_type='relu'):
         return tf.nn.elu
     elif act_type == 'selu':
         return selu
+    elif act_type == 'crelu':
+        return tf.nn.crelu
+    elif act_type == 'leaky_relu':
+        return tf.nn.leaky_relu
     else:
         return lambda x: x
 
@@ -161,7 +165,7 @@ class Model:
     test_gen = None
 
     def __init__(self, input_dim, num_fields, output_dim=1, init_type='xavier', l2_scale=0, loss_type='log_loss',
-                 pos_weight=1., num_shards=0):
+                 pos_weight=1., num_shards=0, input_norm=False, init_sparse=False, init_fused=False):
         self.input_dim = input_dim
         self.num_fields = num_fields
         self.output_dim = output_dim
@@ -170,6 +174,9 @@ class Model:
         self.loss_type = loss_type
         self.pos_weight = pos_weight
         self.num_shards = num_shards
+        self.input_norm = input_norm
+        self.init_sparse = init_sparse
+        self.init_fused = init_fused
 
         self.embed_size = None
         self.nn_layers = None
@@ -193,19 +200,32 @@ class Model:
         with tf.variable_scope('embedding' if not field_aware else 'field_aware_embedding', partitioner=partitioner):
             self.xw, self.xv, self.b = None, None, None
             if weight_flag:
-                w = tf.get_variable(name='w', shape=[self.input_dim, 1], dtype=dtype,
-                                    initializer=get_initializer(init_type=self.init_type),)
+                if not self.init_sparse:
+                    initializer = get_initializer(init_type=self.init_type)
+                else:
+                    maxval = np.sqrt(6 / (self.num_fields + 1))
+                    initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
+                w = tf.get_variable(name='w', shape=[self.input_dim, 1], dtype=dtype, initializer=initializer,)
                 self.xw = tf.nn.embedding_lookup(w, self.inputs)#, partition_strategy='div')
+                if self.input_norm:
+                    self.xw /= self.num_fields
                 tf.add_to_collection(tf.GraphKeys.WEIGHTS, self.xw)
             if vector_flag:
+                if not self.init_sparse:
+                    initializer = get_initializer(init_type=self.init_type)
+                else:
+                    maxval = np.sqrt(6 / (self.num_fields + self.embed_size))
+                    initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
                 if not field_aware:
                     v = tf.get_variable(name='v', shape=[self.input_dim, self.embed_size], dtype=dtype,
-                                        initializer=get_initializer(init_type=self.init_type),)
+                                        initializer=initializer,)
                 else:
                     v = tf.get_variable(name='v', shape=[self.input_dim, (self.num_fields - 1) * self.embed_size],
-                                        dtype=dtype, initializer=get_initializer(init_type=self.init_type),)
+                                        dtype=dtype, initializer=initializer,)
                     v = tf.reshape(v, [self.input_dim, self.num_fields - 1, self.embed_size])
                 self.xv = tf.nn.embedding_lookup(v, self.inputs)#, partition_strategy='div')
+                if self.input_norm:
+                    self.xv /= self.num_fields
                 tf.add_to_collection(tf.GraphKeys.WEIGHTS, self.xv)
             if bias_flag:
                 shape = [1]
@@ -345,10 +365,13 @@ class Model:
                 if sl_type == 'full':
                     with tf.variable_scope('layer_%d' % n_layer) as scope:
                         n_layer += 1
-                        maxval = np.sqrt(6. / (sh_dim + sl_param))
+                        if not self.init_fused:
+                            maxval = np.sqrt(6. / (sh_dim + sl_param))
+                            initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
+                        else:
+                            initializer = get_initializer(init_type=self.init_type)
                         wi = tf.get_variable(name='w', shape=[sh_num, sh_dim, sl_param], dtype=dtype,
-                                             initializer=get_initializer(init_type='uniform', minval=-maxval,
-                                                                         maxval=maxval), collections=WEIGHTS)
+                                             initializer=initializer, collections=WEIGHTS)
                         bi = tf.get_variable(name='b', shape=[sh_num, 1, sl_param], dtype=dtype,
                                              initializer=get_initializer(init_type=0.), collections=BIASES)
                         self.sh = tf.matmul(self.sh, wi) + bi
@@ -402,8 +425,9 @@ class Model:
 
 class LR(Model):
     def __init__(self, input_dim, num_fields, output_dim=1, init_type='xavier', l2_scale=0, loss_type='log_loss',
-                 pos_weight=1., num_shards=0):
-        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards)
+                 pos_weight=1., num_shards=0, input_norm=False, init_sparse=False, init_fused=False):
+        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
+                       input_norm, init_sparse, init_fused)
 
         self.def_placeholder(train_flag=False)
 
@@ -422,8 +446,10 @@ class LR(Model):
 
 class FM(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, output_dim=1, init_type='xavier', l2_scale=0,
-                 loss_type='log_loss', pos_weight=1., num_shards=0):
-        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards)
+                 loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
+                 init_fused=False):
+        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
+                       input_norm, init_sparse, init_fused)
         self.embed_size = embed_size
 
         self.def_placeholder(train_flag=False)
@@ -445,8 +471,10 @@ class FM(Model):
 
 class FFM(Model):
     def __init__(self, input_dim, num_fields, embed_size=2, output_dim=1, init_type='xavier', l2_scale=0,
-                 loss_type='log_loss', pos_weight=1., num_shards=0):
-        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards)
+                 loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
+                 init_fused=False):
+        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
+                       input_norm, init_sparse, init_fused)
         self.embed_size = embed_size
 
         self.def_placeholder(train_flag=False)
@@ -471,8 +499,10 @@ class FFM(Model):
 
 class KFM(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, output_dim=1, init_type='xavier', l2_scale=0,
-                 loss_type='log_loss', pos_weight=1., num_shards=0):
-        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards)
+                 loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
+                 init_fused=False):
+        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
+                       input_norm, init_sparse, init_fused)
         self.embed_size = embed_size
 
         self.def_placeholder(train_flag=False)
@@ -494,8 +524,10 @@ class KFM(Model):
 
 class NFM(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, sub_nn_layers=None, output_dim=1, init_type='xavier',
-                 l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0):
-        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards)
+                 l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
+                 init_fused=False):
+        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
+                       input_norm, init_sparse, init_fused)
         self.embed_size = embed_size
         self.sub_nn_layers = sub_nn_layers
 
@@ -522,8 +554,10 @@ class NFM(Model):
 
 class FNN(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, nn_layers=None, output_dim=1, init_type='xavier',
-                 l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0):
-        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards)
+                 l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
+                 init_fused=False):
+        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
+                       input_norm, init_sparse, init_fused)
         self.embed_size = embed_size
         self.nn_layers = nn_layers
 
@@ -548,8 +582,10 @@ class FNN(Model):
 
 class CCPM(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, nn_layers=None, output_dim=1, init_type='xavier',
-                 l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0):
-        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards)
+                 l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
+                 init_fused=False):
+        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
+                       input_norm, init_sparse, init_fused)
         self.embed_size = embed_size
         self.nn_layers = nn_layers
 
@@ -575,8 +611,10 @@ class CCPM(Model):
 
 class DeepFM(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, nn_layers=None, output_dim=1, init_type='xavier',
-                 l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0):
-        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards)
+                 l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
+                 init_fused=False):
+        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
+                       input_norm, init_sparse, init_fused)
         self.embed_size = embed_size
         self.nn_layers = nn_layers
 
@@ -603,8 +641,10 @@ class DeepFM(Model):
 
 class IPNN(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, nn_layers=None, output_dim=1, init_type='xavier',
-                 l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0):
-        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards)
+                 l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
+                 init_fused=False):
+        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
+                       input_norm, init_sparse, init_fused)
         self.embed_size = embed_size
         self.nn_layers = nn_layers
 
@@ -634,8 +674,10 @@ class IPNN(Model):
 
 class KPNN(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, nn_layers=None, output_dim=1, init_type='xavier',
-                 l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0):
-        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards)
+                 l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
+                 init_fused=False):
+        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
+                       input_norm, init_sparse, init_fused)
         self.embed_size = embed_size
         self.nn_layers = nn_layers
 
@@ -662,19 +704,27 @@ class KPNN(Model):
 
 class PIN(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, sub_nn_layers=None, nn_layers=None, output_dim=1,
-                 init_type='xavier', l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0):
-        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards)
+                 init_type='xavier', l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, wide=False,
+                 input_norm=False, init_sparse=False, init_fused=False):
+        Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
+                       input_norm, init_sparse, init_fused)
         self.embed_size = embed_size
         self.sub_nn_layers = sub_nn_layers
         self.nn_layers = nn_layers
 
         self.def_placeholder(train_flag=True)
 
-        self.embedding_lookup(weight_flag=False, bias_flag=False)
+        if not wide:
+            self.embedding_lookup(weight_flag=False, bias_flag=False)
+        else:
+            self.embedding_lookup()
+            self.def_inner_product()
+            self.wide = tf.reduce_sum(self.xw, axis=1) + self.b + 0.5 * self.p
 
         xv_p, xv_q = unroll_pairwise(self.xv, num_fields=self.num_fields)
-        # batch * pair * 2k
-        self.sub_nn_input = tf.concat([xv_p, xv_q], axis=2)
+        # TODO check this
+        # batch * pair * 3k
+        self.sub_nn_input = tf.concat([xv_p, xv_q, xv_p * xv_q], axis=2)
 
         self.def_sub_nn_layers()
 

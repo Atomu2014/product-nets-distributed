@@ -683,7 +683,7 @@ class KPNN(Model):
 
 class PIN(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, sub_nn_layers=None, nn_layers=None, output_dim=1,
-                 init_type='xavier', l2_scale=0, loss_type='log_loss', pos_weight=1.):
+                 init_type='xavier', l2_scale=0, loss_type='log_loss', pos_weight=1., wide=False):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight)
         self.embed_size = embed_size
         self.sub_nn_layers = sub_nn_layers
@@ -691,7 +691,12 @@ class PIN(Model):
 
         self.def_placeholder(train_flag=True)
 
-        self.embedding_lookup(weight_flag=False, bias_flag=False)
+        if not wide:
+            self.embedding_lookup(weight_flag=False, bias_flag=False)
+        else:
+            self.embedding_lookup()
+            self.def_inner_product()
+            self.wide = tf.reduce_sum(self.xw, axis=1) + self.b + 0.5 * self.p
 
         xv_p, xv_q = unroll_pairwise(self.xv, num_fields=self.num_fields)
         # batch * pair * 2k
@@ -705,7 +710,7 @@ class PIN(Model):
 
         self.def_nn_layers()
 
-        self.logits = self.h
+        self.logits = self.h + self.wide
 
         self.preds = tf.sigmoid(self.logits)
 
