@@ -20,37 +20,41 @@ from tf_models_share_vars import as_model
 
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_integer('num_shards', 1, 'Number of variable partitions')
-tf.app.flags.DEFINE_bool('sparse_grad', True, 'Apply sparse gradient')
+tf.app.flags.DEFINE_integer('num_gpus', 2, 'Number of variable partitions')
+tf.app.flags.DEFINE_bool('sparse_grad', False, 'Apply sparse gradient')
 
-tf.app.flags.DEFINE_integer('num_gpus', 2, '# gpus')
 tf.app.flags.DEFINE_string('logdir', '../log', 'Directory for storing mnist data')
 tf.app.flags.DEFINE_bool('restore', False, 'Restore from logdir')
-tf.app.flags.DEFINE_bool('val', False, 'If True, use validation set, else use test set')
-tf.app.flags.DEFINE_integer('batch_size', 1000, 'Training batch size')
-tf.app.flags.DEFINE_integer('test_batch_size', 2000, 'Testing batch size')
-tf.app.flags.DEFINE_float('learning_rate', 1e-3, 'Learning rate')
+tf.app.flags.DEFINE_bool('val', True, 'If True, use validation set, else use test set')
+tf.app.flags.DEFINE_integer('batch_size', 1024, 'Training batch size')
+tf.app.flags.DEFINE_integer('test_batch_size', 2048, 'Testing batch size')
+# 1e-4 ~1e-5
+tf.app.flags.DEFINE_float('learning_rate', 1e-4, 'Learning rate')
+tf.app.flags.DEFINE_string('prefix', '', 'Prefix for logdir')
 
-tf.app.flags.DEFINE_string('dataset', 'criteo',
-                           'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
-tf.app.flags.DEFINE_string('model', 'pin',
-                           'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
+tf.app.flags.DEFINE_string('dataset', 'criteo_challenge', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
+tf.app.flags.DEFINE_float('val_ratio', 0., 'Validation ratio')
+tf.app.flags.DEFINE_string('model', 'pin', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
 tf.app.flags.DEFINE_string('optimizer', 'adam', 'Optimizer')
+# 1e-8 ~ 1e-4
+tf.app.flags.DEFINE_string('epsilon', 1e-8, 'Epsilon for adam')
 tf.app.flags.DEFINE_float('l2_scale', 0, 'L2 regularization')
-tf.app.flags.DEFINE_integer('embed_size', 80, 'Embedding size')
-# e.g. [["conv", [5, 10]], ["act", "relu"], ["flat", [1, 2]], ["full", 100], ["act", "relu"], ["drop", 0.5], ["full", 1]]
-tf.app.flags.DEFINE_string('nn_layers', '[["full", 700], ["ln", "no_share"], ["act", "relu"], '
-                                        '["full", 700], ["ln", "no_share"], ["act", "relu"], '
-                                        '["full", 700], ["ln", "no_share"], ["act", "relu"], '
-                                        '["full", 700], ["ln", "no_share"], ["act", "relu"], '
-                                        '["full", 700], ["ln", "no_share"], ["act", "relu"], '
+# 2 4 6 8 10
+tf.app.flags.DEFINE_integer('embed_size', 10, 'Embedding size')
+# ~ 1000 * 3
+tf.app.flags.DEFINE_string('nn_layers', '[["full", 1000], ["ln", ""],  ["act", "relu"], '
+                                        '["full", 1000], ["ln", ""],  ["act", "relu"], '
+                                        '["full", 1000], ["ln", ""],  ["act", "relu"], '
                                         '["full", 1]]', 'Network structure')
-# e.g. [["full", 5], ["act", "relu"], ["drop", 0.9], ["full", 1]]
-tf.app.flags.DEFINE_string('sub_nn_layers', '[["full", 40], ["ln", "no_share"], ["act", "relu"], '
-                                            '["full", 5], ["ln", "no_share"]]', 'Sub-network structure')
+# 40 ~ ?
+tf.app.flags.DEFINE_string('sub_nn_layers', '[["full", 40], ["ln", ""], ["act", "relu"], '
+                                            '["full", 5],  ["ln", ""]]', 'Sub-network structure')
 
-tf.app.flags.DEFINE_integer('num_rounds', 2, 'Number of training rounds')
-tf.app.flags.DEFINE_integer('eval_level', 10, 'Evaluating frequency level')
-tf.app.flags.DEFINE_float('decay', 0.9, 'Learning rate decay')
+tf.app.flags.DEFINE_integer('num_rounds', 3, 'Number of training rounds')
+# ?
+tf.app.flags.DEFINE_integer('eval_level', 5, 'Evaluating frequency level')
+# ?
+tf.app.flags.DEFINE_float('decay', 1, 'Learning rate decay')
 tf.app.flags.DEFINE_integer('log_frequency', 1000, 'Logging frequency')
 
 
@@ -59,7 +63,7 @@ def get_logdir(FLAGS):
         logdir = FLAGS.logdir
     else:
         logdir = '%s/%s/%s/%s' % (
-            FLAGS.logdir, FLAGS.dataset, FLAGS.model, datetime.utcnow().strftime('%Y-%m-%d-%H-%M-%S'))
+            FLAGS.logdir, FLAGS.dataset, FLAGS.model, FLAGS.prefix + datetime.utcnow().strftime('%Y-%m-%d-%H-%M-%S'))
     if not os.path.exists(logdir):
         os.makedirs(logdir)
     logfile = open(logdir + '/log', 'a')
@@ -94,18 +98,21 @@ class Trainer:
         self.ckpt_dir = os.path.join(self.logdir, 'checkpoints')
         self.ckpt_name = 'model.ckpt'
         self.worker_dir = ''
+        self.sub_file = os.path.join(self.logdir, 'submission.%d.csv')
         redirect_stdout(self.logfile)
         self.train_data_param = {
             'gen_type': 'train',
             'random_sample': True,
             'batch_size': FLAGS.batch_size,
             'squeeze_output': False,
+            'val_ratio': FLAGS.val_ratio,
         }
         self.valid_data_param = {
             'gen_type': 'valid' if FLAGS.val else 'test',
             'random_sample': False,
             'batch_size': FLAGS.test_batch_size,
             'squeeze_output': False,
+            'val_ratio': FLAGS.val_ratio,
         }
         self.test_data_param = {
             'gen_type': 'test',
@@ -133,14 +140,11 @@ class Trainer:
         self.tower_grads = []
         self.models = []
 
-        def device_op(gpu_index):
-            return '/gpu:%d' % gpu_index
-
         with tf.device('/gpu:0'):
             num_gpus = FLAGS.num_gpus
             with tf.variable_scope(tf.get_variable_scope()):
                 for i in xrange(num_gpus):
-                    with tf.device(device_op(i)):
+                    with tf.device('/gpu:%d' % i):
                         print('Deploying gpu:%d ...' % i)
                         if i == 0:
                             self.global_step = tf.get_variable(name='global_step', dtype=tf.int32, shape=[],
@@ -149,7 +153,7 @@ class Trainer:
                                                                  initializer=tf.constant_initializer(
                                                                      FLAGS.learning_rate),
                                                                  trainable=False)
-                            self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate)
+                            self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate, epsilon=FLAGS.epsilon)
                         with tf.name_scope('tower_%d' % i):
                             model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
                                              num_fields=self.dataset.num_fields,
@@ -203,13 +207,13 @@ class Trainer:
             return tf.Session(config=gpu_config)
 
         num_gpus = FLAGS.num_gpus
-        total_num_gpus = num_gpus
-        self.num_steps = int(np.ceil(self.dataset.train_size / FLAGS.batch_size / num_gpus))
+        train_size = int(self.dataset.train_size * (1 - FLAGS.val_ratio))
+        self.num_steps = int(np.ceil(train_size / FLAGS.batch_size / num_gpus))
         self.eval_steps = int(np.ceil(self.num_steps / FLAGS.eval_level)) if FLAGS.eval_level else 0
 
         with sess_op() as self.sess:
-            print('Train size = %d, Batch size = %d, GPUs = %d/%d' %
-                  (self.dataset.train_size, FLAGS.batch_size, num_gpus, total_num_gpus))
+            print('Train size = %d, Batch size = %d, GPUs = %d' %
+                  (self.dataset.train_size, FLAGS.batch_size, num_gpus))
             print('%d rounds in total, One round = %d steps, One evaluation = %d steps' %
                   (FLAGS.num_rounds, self.num_steps, self.eval_steps))
 
@@ -237,6 +241,11 @@ class Trainer:
             self.step = self.begin_step
             self.local_step = self.begin_step
             self.start_time = time.time()
+
+            print('Init evaluation')
+            if FLAGS.val_ratio > 0:
+                self.evaluate(self.valid_gen)
+            prev_loss = 100000
 
             for r in range(1, FLAGS.num_rounds + 1):
                 print('Round: %d' % r)
@@ -279,12 +288,19 @@ class Trainer:
                         print('Round: %d, Eval: %d / %d, AvgTime: %3.2fms, Elapsed: %.2fs, ETA: %s' %
                               (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / self.step),
                                elapsed_time, self.get_timedelta(eta=eta)))
-                        # self.evaluate(self.valid_gen, self.valid_writer)
+                        if FLAGS.val_ratio > 0:
+                            _val_loss_, _ = self.evaluate(self.valid_gen, self.valid_writer)
                         self.learning_rate.assign(self.learning_rate * FLAGS.decay)
+
                 self.saver.save(self.sess, os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
                 print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
-                self.evaluate(self.valid_gen, self.valid_writer)
-            self.evaluate(self.test_gen, self.test_writer)
+                self.evaluate(self.test_gen, submission=r)
+                if FLAGS.val_ratio > 0:
+                    if _val_loss_ > prev_loss:
+                        print('Early stop at round %d' % r)
+                        return
+                    else:
+                        prev_loss = _val_loss_
 
     def get_elapsed(self):
         return time.time() - self.start_time
@@ -315,7 +331,7 @@ class Trainer:
         print('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
         open(path_json, 'w').write(config_json)
 
-    def evaluate(self, gen, writer=None, eps=1e-6):
+    def evaluate(self, gen, writer=None, eps=1e-6, submission=0):
         labels = []
         preds = []
         start_time = time.time()
@@ -360,20 +376,27 @@ class Trainer:
         preds = np.hstack(preds)
         _min_ = len(np.where(preds < eps)[0])
         _max_ = len(np.where(preds > 1 - eps)[0])
+        print('%d samples are evaluated' % len(labels))
         print('EPS: %g, %d (%.2f) < eps, %d (%.2f) > 1-eps, %d (%.2f) are truncated' %
               (eps, _min_, _min_ / len(preds), _max_, _max_ / len(preds), _min_ + _max_, (_min_ + _max_) / len(preds)))
         preds[preds < eps] = eps
         preds[preds > 1 - eps] = 1 - eps
-        _log_loss_ = log_loss(y_true=labels, y_pred=preds)
-        _auc_ = roc_auc_score(y_true=labels, y_score=preds)
-        elapsed = time.time() - start_time
-        print('%s-Loss: %2.4f, AUC: %2.4f, Elapsed: %s' %
-              (gen.gen_type.capitalize(), _log_loss_, _auc_, self.get_timedelta(elapsed)))
-        if not FLAGS.restore and writer:
-            summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
-                                        tf.Summary.Value(tag='auc', simple_value=_auc_)])
-            writer.add_summary(summary, global_step=self.step)
-        return _log_loss_, _auc_
+        if not submission:
+            _log_loss_ = log_loss(y_true=labels, y_pred=preds)
+            _auc_ = roc_auc_score(y_true=labels, y_score=preds)
+            print('%s-Loss: %2.4f, AUC: %2.4f, Elapsed: %s' %
+                  (gen.gen_type.capitalize(), _log_loss_, _auc_, str(timedelta(seconds=(time.time() - start_time)))))
+            if writer:
+                summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
+                                            tf.Summary.Value(tag='auc', simple_value=_auc_)])
+                writer.add_summary(summary, global_step=self.step)
+            return _log_loss_, _auc_
+        else:
+            with open(self.sub_file % submission, 'w') as f:
+                f.write('Id,Predicted\n')
+                for i, p in enumerate(preds):
+                    f.write('{0},{1}\n'.format(i + 60000000, p))
+            print('Submission file: %s' % (self.sub_file % submission))
 
 
 def main(_):

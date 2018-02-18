@@ -446,7 +446,8 @@ class Trainer:
                     if self.step % FLAGS.log_frequency == 0 and (FLAGS.lazy_update <= 1 or (
                             FLAGS.lazy_update > 1 and self.local_step % FLAGS.lazy_update == 0)):
                         elapsed_time = self.get_elapsed()
-                        print('Done step %d, Elapsed: %.2fs, Train-Loss: %.4f, Log-Loss: %.4f, L2-Loss: %g'
+                        # TODO change other code to 6-bit precession
+                        print('Done step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
                               % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
                         summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=_loss_),
                                                     tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
@@ -512,39 +513,61 @@ class Trainer:
         print('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
         open(path_json, 'w').write(config_json)
 
-    def evaluate(self, gen, writer=None):
+    def evaluate(self, gen, writer=None, eps=1e-6):
         labels = []
         preds = []
         start_time = time.time()
         _iter = iter(gen)
-        fetches = []
-        feed_dict = {}
-        for model in self.models:
-            fetches.append(model.preds)
-            try:
-                xs, ys = _iter.next()
-                feed_dict[model.inputs] = xs
-                feed_dict[model.labels] = ys
-                labels.append(ys)
-                if model.training is not None:
-                    feed_dict[model.training] = False
-            except StopIteration:
-                pass
-        _preds_ = self.sess.run(fetches=fetches, feed_dict=feed_dict)
-        if type(_preds_) is list:
-            preds.extend(_preds_)
-        else:
-            preds.append(_preds_)
-        labels = np.vstack(labels)
-        preds = np.vstack(preds)
-        eps = 1e-6
+        flag = True
+        cnt = 0
+        if gen.gen_type == 'test':
+            gen_size = self.dataset.test_size
+        elif gen.gen_type == 'valid':
+            gen_size = int(self.dataset.train_size * gen.val_ratio)
+        elif gen.gen_type == 'train':
+            gen_size = int(self.dataset.train_size * (1 - gen.val_ratio))
+        total_step = gen_size / gen.batch_size
+        while flag:
+            fetches = []
+            feed_dict = {}
+            for model in self.models:
+                try:
+                    xs, ys = _iter.next()
+                    cnt += 1
+                    fetches.append(model.preds)
+                    feed_dict[model.inputs] = xs
+                    feed_dict[model.labels] = ys
+                    labels.append(ys.flatten())
+                    if model.training is not None:
+                        feed_dict[model.training] = False
+                except StopIteration:
+                    flag = False
+                    break
+            if cnt % FLAGS.log_frequency == 0:
+                elapsed = time.time() - start_time
+                print('Eval step: %d / %d, Elapsed: %s' % (cnt, total_step, self.get_timedelta(elapsed)))
+            if len(feed_dict):
+                _preds_ = self.sess.run(fetches=fetches, feed_dict=feed_dict)
+                if type(_preds_) is list:
+                    preds.extend([x.flatten() for x in _preds_])
+                else:
+                    preds.append(_preds_.flatten())
+        elapsed = time.time() - start_time
+        print('Eval step: %d / %d, Elapsed: %s' % (cnt, total_step, self.get_timedelta(elapsed)))
+        labels = np.hstack(labels)
+        preds = np.hstack(preds)
+        _min_ = len(np.where(preds < eps)[0])
+        _max_ = len(np.where(preds > 1 - eps)[0])
+        print('EPS: %g, %d (%.2f) < eps, %d (%.2f) > 1-eps, %d (%.2f) are truncated' %
+              (eps, _min_, _min_ / len(preds), _max_, _max_ / len(preds), _min_ + _max_, (_min_ + _max_) / len(preds)))
         preds[preds < eps] = eps
         preds[preds > 1 - eps] = 1 - eps
         _log_loss_ = log_loss(y_true=labels, y_pred=preds)
         _auc_ = roc_auc_score(y_true=labels, y_score=preds)
-        print('%s-Loss: %2.4f, AUC: %2.4f, Elapsed: %s' %
-              (gen.gen_type.capitalize(), _log_loss_, _auc_, str(timedelta(seconds=(time.time() - start_time)))))
-        if writer:
+        elapsed = time.time() - start_time
+        print('%s-Loss: %.6f, AUC: %.6f, Elapsed: %s' %
+              (gen.gen_type.capitalize(), _log_loss_, _auc_, self.get_timedelta(elapsed)))
+        if not FLAGS.restore and writer:
             summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
                                         tf.Summary.Value(tag='auc', simple_value=_auc_)])
             writer.add_summary(summary, global_step=self.step)

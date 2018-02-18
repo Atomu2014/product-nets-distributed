@@ -271,7 +271,10 @@ class Model:
         num_pairs = int(self.num_fields * (self.num_fields - 1) / 2)
         with tf.variable_scope('kernel_product'):
             if kernel is None:
-                maxval = np.sqrt(3. / self.embed_size)
+                if not self.init_fused:
+                    maxval = np.sqrt(3. / self.embed_size)
+                else:
+                    maxval = np.sqrt(3. / num_pairs / self.embed_size)
                 shape = [self.embed_size, num_pairs, self.embed_size]
                 kernel = tf.get_variable(name='kernel', shape=shape, dtype=dtype, initializer=get_initializer(
                     init_type='uniform', minval=-maxval, maxval=maxval), collections=WEIGHTS)
@@ -705,7 +708,7 @@ class KPNN(Model):
 class PIN(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, sub_nn_layers=None, nn_layers=None, output_dim=1,
                  init_type='xavier', l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, wide=False,
-                 input_norm=False, init_sparse=False, init_fused=False):
+                 prod=True, input_norm=False, init_sparse=False, init_fused=False):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
                        input_norm, init_sparse, init_fused)
         self.embed_size = embed_size
@@ -723,8 +726,11 @@ class PIN(Model):
 
         xv_p, xv_q = unroll_pairwise(self.xv, num_fields=self.num_fields)
         # TODO check this
-        # batch * pair * 3k
-        self.sub_nn_input = tf.concat([xv_p, xv_q, xv_p * xv_q], axis=2)
+        if prod:
+            # batch * pair * 3k
+            self.sub_nn_input = tf.concat([xv_p, xv_q, xv_p * xv_q], axis=2)
+        else:
+            self.sub_nn_input = tf.concat([xv_p, xv_q], axis=2)
 
         self.def_sub_nn_layers()
 
