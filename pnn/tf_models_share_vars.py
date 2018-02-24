@@ -165,7 +165,7 @@ class Model:
     test_gen = None
 
     def __init__(self, input_dim, num_fields, output_dim=1, init_type='xavier', l2_scale=0, loss_type='log_loss',
-                 pos_weight=1., num_shards=0, input_norm=False, init_sparse=False, init_fused=False):
+                 pos_weight=1., num_shards=0, input_norm=False, init_sparse=False, init_fused=False, loss_mode='mean'):
         self.input_dim = input_dim
         self.num_fields = num_fields
         self.output_dim = output_dim
@@ -177,6 +177,7 @@ class Model:
         self.input_norm = input_norm
         self.init_sparse = init_sparse
         self.init_fused = init_fused
+        self.loss_mode = loss_mode
 
         self.embed_size = None
         self.nn_layers = None
@@ -205,8 +206,8 @@ class Model:
                 else:
                     maxval = np.sqrt(6 / (self.num_fields + 1))
                     initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
-                w = tf.get_variable(name='w', shape=[self.input_dim, 1], dtype=dtype, initializer=initializer,)
-                self.xw = tf.nn.embedding_lookup(w, self.inputs)#, partition_strategy='div')
+                w = tf.get_variable(name='w', shape=[self.input_dim, 1], dtype=dtype, initializer=initializer, )
+                self.xw = tf.nn.embedding_lookup(w, self.inputs)  # , partition_strategy='div')
                 if self.input_norm:
                     self.xw /= self.num_fields
                 tf.add_to_collection(tf.GraphKeys.WEIGHTS, self.xw)
@@ -218,12 +219,12 @@ class Model:
                     initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
                 if not field_aware:
                     v = tf.get_variable(name='v', shape=[self.input_dim, self.embed_size], dtype=dtype,
-                                        initializer=initializer,)
+                                        initializer=initializer, )
                 else:
                     v = tf.get_variable(name='v', shape=[self.input_dim, (self.num_fields - 1) * self.embed_size],
-                                        dtype=dtype, initializer=initializer,)
+                                        dtype=dtype, initializer=initializer, )
                     v = tf.reshape(v, [self.input_dim, self.num_fields - 1, self.embed_size])
-                self.xv = tf.nn.embedding_lookup(v, self.inputs)#, partition_strategy='div')
+                self.xv = tf.nn.embedding_lookup(v, self.inputs)  # , partition_strategy='div')
                 if self.input_norm:
                     self.xv /= self.num_fields
                 tf.add_to_collection(tf.GraphKeys.WEIGHTS, self.xv)
@@ -235,13 +236,12 @@ class Model:
     def def_log_loss(self):
         self.loss_type = self.loss_type.lower()
         assert self.loss_type in {'log_loss', 'weighted_log_loss'}, 'loss_type in {"log_loss", "weighted_log_loss"}'
+        reduce_op = tf.reduce_mean if self.loss_mode == 'mean' else tf.reduce_sum
         if self.loss_type == 'log_loss':
-            self.log_loss = tf.reduce_mean(
-                tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=self.logits))
+            self.log_loss = reduce_op(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=self.logits))
         else:
-            self.log_loss = tf.reduce_mean(
-                tf.nn.weighted_cross_entropy_with_logits(targets=self.labels, logits=self.logits,
-                                                         pos_weight=self.pos_weight))
+            self.log_loss = reduce_op(tf.nn.weighted_cross_entropy_with_logits(targets=self.labels, logits=self.logits,
+                                                                               pos_weight=self.pos_weight))
 
     def def_l2_loss(self):
         if self.l2_scale > 0:
@@ -428,9 +428,9 @@ class Model:
 
 class LR(Model):
     def __init__(self, input_dim, num_fields, output_dim=1, init_type='xavier', l2_scale=0, loss_type='log_loss',
-                 pos_weight=1., num_shards=0, input_norm=False, init_sparse=False, init_fused=False):
+                 pos_weight=1., num_shards=0, input_norm=False, init_sparse=False, init_fused=False, loss_mode='mean'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
-                       input_norm, init_sparse, init_fused)
+                       input_norm, init_sparse, init_fused, loss_mode)
 
         self.def_placeholder(train_flag=False)
 
@@ -450,9 +450,9 @@ class LR(Model):
 class FM(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, output_dim=1, init_type='xavier', l2_scale=0,
                  loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
-                 init_fused=False):
+                 init_fused=False, loss_mode='mean'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
-                       input_norm, init_sparse, init_fused)
+                       input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
 
         self.def_placeholder(train_flag=False)
@@ -475,9 +475,9 @@ class FM(Model):
 class FFM(Model):
     def __init__(self, input_dim, num_fields, embed_size=2, output_dim=1, init_type='xavier', l2_scale=0,
                  loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
-                 init_fused=False):
+                 init_fused=False, loss_mode='mean'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
-                       input_norm, init_sparse, init_fused)
+                       input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
 
         self.def_placeholder(train_flag=False)
@@ -503,9 +503,9 @@ class FFM(Model):
 class KFM(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, output_dim=1, init_type='xavier', l2_scale=0,
                  loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
-                 init_fused=False):
+                 init_fused=False, loss_mode='mean'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
-                       input_norm, init_sparse, init_fused)
+                       input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
 
         self.def_placeholder(train_flag=False)
@@ -528,9 +528,9 @@ class KFM(Model):
 class NFM(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, sub_nn_layers=None, output_dim=1, init_type='xavier',
                  l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
-                 init_fused=False):
+                 init_fused=False, loss_mode='mean'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
-                       input_norm, init_sparse, init_fused)
+                       input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
         self.sub_nn_layers = sub_nn_layers
 
@@ -558,9 +558,9 @@ class NFM(Model):
 class FNN(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, nn_layers=None, output_dim=1, init_type='xavier',
                  l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
-                 init_fused=False):
+                 init_fused=False, loss_mode='mean'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
-                       input_norm, init_sparse, init_fused)
+                       input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
         self.nn_layers = nn_layers
 
@@ -586,9 +586,9 @@ class FNN(Model):
 class CCPM(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, nn_layers=None, output_dim=1, init_type='xavier',
                  l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
-                 init_fused=False):
+                 init_fused=False, loss_mode='mean'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
-                       input_norm, init_sparse, init_fused)
+                       input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
         self.nn_layers = nn_layers
 
@@ -615,9 +615,9 @@ class CCPM(Model):
 class DeepFM(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, nn_layers=None, output_dim=1, init_type='xavier',
                  l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
-                 init_fused=False):
+                 init_fused=False, loss_mode='mean'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
-                       input_norm, init_sparse, init_fused)
+                       input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
         self.nn_layers = nn_layers
 
@@ -645,9 +645,9 @@ class DeepFM(Model):
 class IPNN(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, nn_layers=None, output_dim=1, init_type='xavier',
                  l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
-                 init_fused=False):
+                 init_fused=False, loss_mode='mean'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
-                       input_norm, init_sparse, init_fused)
+                       input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
         self.nn_layers = nn_layers
 
@@ -678,9 +678,9 @@ class IPNN(Model):
 class KPNN(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, nn_layers=None, output_dim=1, init_type='xavier',
                  l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False, init_sparse=False,
-                 init_fused=False):
+                 init_fused=False, loss_mode='mean'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
-                       input_norm, init_sparse, init_fused)
+                       input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
         self.nn_layers = nn_layers
 
@@ -708,9 +708,9 @@ class KPNN(Model):
 class PIN(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, sub_nn_layers=None, nn_layers=None, output_dim=1,
                  init_type='xavier', l2_scale=0, loss_type='log_loss', pos_weight=1., num_shards=0, wide=False,
-                 prod=True, input_norm=False, init_sparse=False, init_fused=False):
+                 prod=True, input_norm=False, init_sparse=False, init_fused=False, loss_mode='mean'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_scale, loss_type, pos_weight, num_shards,
-                       input_norm, init_sparse, init_fused)
+                       input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
         self.sub_nn_layers = sub_nn_layers
         self.nn_layers = nn_layers

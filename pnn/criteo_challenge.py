@@ -31,7 +31,7 @@ tf.app.flags.DEFINE_integer('test_batch_size', 2048, 'Testing batch size')
 # 1e-4 1e-3
 tf.app.flags.DEFINE_float('learning_rate', 1e-4, 'Learning rate')
 tf.app.flags.DEFINE_string('prefix', '', 'Prefix for logdir')
-
+tf.app.flags.DEFINE_string('loss_mode', 'mean', 'Loss = mean, sum')
 tf.app.flags.DEFINE_string('dataset', 'criteo_challenge', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
 tf.app.flags.DEFINE_float('val_ratio', 0., 'Validation ratio')
 tf.app.flags.DEFINE_string('model', 'pin', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
@@ -46,6 +46,7 @@ tf.app.flags.DEFINE_bool('init_sparse', False, 'Init sparse layer')
 tf.app.flags.DEFINE_bool('init_fused', False, 'Init fused layer')
 tf.app.flags.DEFINE_string('optimizer', 'adam', 'Optimizer')
 tf.app.flags.DEFINE_float('epsilon', 1e-8, 'Epsilon for adam')
+tf.app.flags.DEFINE_float('init_val', 0.1, 'Initial accumulator value for adagrad')
 tf.app.flags.DEFINE_float('l2_scale', 0, 'L2 regularization')
 # 16 20
 tf.app.flags.DEFINE_integer('embed_size', 20, 'Embedding size')
@@ -86,15 +87,16 @@ def redirect_stdout(logfile):
     phOut.Start(MyHookOut)
 
 
-def get_optimizer(opt, lr, **kwargs):
+def get_optimizer(opt, lr):
     opt = opt.lower()
-    eps = kwargs['epsilon'] if 'epsilon' in kwargs else 1e-8
+    eps = FLAGS.epsilon
+    init_val = FLAGS.init_val
     if opt == 'sgd' or opt == 'gd':
         return tf.train.GradientDescentOptimizer(learning_rate=lr)
     elif opt == 'adam':
         return tf.train.AdamOptimizer(learning_rate=lr, epsilon=eps)
     elif opt == 'adagrad':
-        return tf.train.AdagradOptimizer(learning_rate=lr)
+        return tf.train.AdagradOptimizer(learning_rate=lr, initial_accumulator_value=init_val)
 
 
 class Trainer:
@@ -132,7 +134,9 @@ class Trainer:
         gpu_config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False,
                                     gpu_options={'allow_growth': True})
 
-        self.model_param = {'l2_scale': FLAGS.l2_scale, 'num_shards': FLAGS.num_shards}
+        self.model_param = {'l2_scale': FLAGS.l2_scale, 'num_shards': FLAGS.num_shards, 'input_norm': FLAGS.input_norm,
+                            'init_sparse': FLAGS.init_sparse, 'init_fused': FLAGS.init_fused,
+                            'loss_mode': FLAGS.loss_mode}
         if FLAGS.model != 'lr':
             self.model_param['embed_size'] = FLAGS.embed_size
         if FLAGS.model in ['fnn', 'ccpm', 'deepfm', 'ipnn', 'kpnn', 'pin']:
@@ -198,14 +202,25 @@ class Trainer:
                 else:
                     print('Restore failed')
 
+            print('Initial evaluation')
+            cnt = 0
+            for xs, ys in self.test_gen:
+                feed_dict = {self.model.inputs: xs, self.model.labels: ys}
+                if self.model.training is not None:
+                    feed_dict[self.model.training] = False
+                self.sess.run(fetches=self.model.preds, feed_dict=feed_dict)
+                cnt += 1
+                if cnt == 100:
+                    break
+
             self.begin_step = self.global_step.eval(self.sess)
             self.step = self.begin_step
             self.local_step = self.begin_step
             self.start_time = time.time()
 
-            print('Init evaluation')
-            if FLAGS.val_ratio > 0:
-                self.evaluate(self.valid_gen)
+            # print('Init evaluation')
+            # if FLAGS.val_ratio > 0:
+            #     self.evaluate(self.valid_gen)
             prev_loss = 100000
 
             for r in range(1, FLAGS.num_rounds + 1):
