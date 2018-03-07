@@ -279,7 +279,7 @@ class Model:
                 tf.reduce_sum(tf.square(self.xv), 1),
                 axis=1, keep_dims=True)
 
-    def def_kernel_product(self, kernel=None, dtype=tf.float32):
+    def def_kernel_product(self, kernel=None, dtype=tf.float32, unit_kernel=False, fix_kernel=False, kernel_type='mat'):
         """
         :param kernel: k * pair * k
         :return: batch * pair
@@ -291,29 +291,41 @@ class Model:
                 if self.init_fused:
                     # TODO: check this
                     # maxval = np.sqrt(3. / num_pairs / self.embed_size)
-                    initializer = get_initializer(init_type='uniform', minval=-1 / self.embed_size,
-                                                  maxval=1 / self.embed_size)
-                elif self.init_orth:
-                    initializer = get_initializer(init_type='orth')
+                    maxval = 1 / self.embed_size
+                    initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
+                # elif self.init_orth:
+                #     initializer = get_initializer(init_type='orth')
                 else:
                     # TODO:
                     maxval = np.sqrt(1. / self.embed_size)
                     initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
-                shape = [self.embed_size, num_pairs, self.embed_size]
+                if kernel_type == 'mat':
+                    shape = [self.embed_size, num_pairs, self.embed_size]
+                elif kernel_type == 'vec':
+                    shape = [num_pairs, self.embed_size]
+                    # TODO
+                    initializer = get_initializer(init_type=1.)
+                else:
+                    shape = [num_pairs, 1]
+                    # TODO
+                    initializer = get_initializer(init_type=1.)
                 kernel = tf.get_variable(name='kernel', shape=shape, dtype=dtype, initializer=initializer,
-                                         collections=KERNELS, trainable=not self.fix_kernel)
-            # batch * 1 * pair * k
-            xv_pe = tf.expand_dims(xv_p, 1)
-            # batch * pair * k
-            pd = tf.transpose(
-                    # batch * k * pair
-                    tf.reduce_sum(
-                        # batch * k * pair * k
-                        tf.multiply(
-                            xv_pe, kernel),
-                        -1),
-                    [0, 2, 1])
-            if self.unit_kernel:
+                                         collections=KERNELS, trainable=not fix_kernel)
+            if kernel_type == 'mat':
+                # batch * 1 * pair * k
+                xv_pe = tf.expand_dims(xv_p, 1)
+                # batch * pair * k
+                pd = tf.transpose(
+                        # batch * k * pair
+                        tf.reduce_sum(
+                            # batch * k * pair * k
+                            tf.multiply(
+                                xv_pe, kernel),
+                            -1),
+                        [0, 2, 1])
+            else:
+                pd = xv_p * kernel
+            if unit_kernel:
                 p_norm = tf.sqrt(tf.reduce_sum(tf.square(xv_p), 2, keep_dims=True))
                 pd_norm = tf.sqrt(tf.reduce_sum(tf.square(pd), 2, keep_dims=True))
                 pd *= p_norm / pd_norm
@@ -531,22 +543,24 @@ class FFM(Model):
 class KFM(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, output_dim=1, init_type='xavier', l2_embed=0, l2_kernel=0,
                  unit_kernel=True, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False,
-                 init_sparse=False, init_fused=False, loss_mode='mean', init_orth=True, fix_kernel=False):
+                 init_sparse=False, init_fused=False, loss_mode='mean', init_orth=True, fix_kernel=False, linear=True,
+                 kernel_type='mat'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_embed, loss_type, pos_weight, num_shards,
                        input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
         self.l2_kernel = l2_kernel
-        self.unit_kernel = unit_kernel
-        self.init_orth = init_orth
-        self.fix_kernel = fix_kernel
+        # self.init_orth = init_orth
 
         self.def_placeholder(train_flag=False)
 
-        self.embedding_lookup()
+        self.embedding_lookup(weight_flag=linear, bias_flag=linear)
 
-        self.def_kernel_product()
+        self.def_kernel_product(unit_kernel=unit_kernel, fix_kernel=fix_kernel, kernel_type=kernel_type)
 
-        self.logits = tf.reduce_sum(self.xw, axis=1) + self.b + tf.reduce_sum(self.kp, axis=1, keep_dims=True)
+        self.logits = tf.reduce_sum(self.kp, axis=1, keep_dims=True)
+
+        if linear:
+            self.logits += tf.reduce_sum(self.xw, axis=1) + self.b
 
         self.preds = tf.sigmoid(self.logits)
 

@@ -47,13 +47,15 @@ tf.app.flags.DEFINE_bool('init_fused', False, 'Init fused layer')
 tf.app.flags.DEFINE_bool('init_orth', False, 'Init orthogonal kernels')
 tf.app.flags.DEFINE_string('optimizer', 'adagrad', 'Optimizer')
 tf.app.flags.DEFINE_float('epsilon', 1e-8, 'Epsilon for adam')
-tf.app.flags.DEFINE_float('init_val', 0.1, 'Initial accumulator value for adagrad')
-tf.app.flags.DEFINE_float('l2_embed', 2e-5, 'L2 regularization')
+tf.app.flags.DEFINE_float('init_val', 1, 'Initial accumulator value for adagrad')
+tf.app.flags.DEFINE_float('l2_embed', 0, 'L2 regularization')
 tf.app.flags.DEFINE_float('l2_kernel', 0, 'L2 regularization for kernels')
 tf.app.flags.DEFINE_bool('unit_kernel', False, 'Kernel in unit ball')
 tf.app.flags.DEFINE_bool('fix_kernel', False, 'Fix kernel')
+tf.app.flags.DEFINE_bool('linear', True, 'Linear terms')
+tf.app.flags.DEFINE_string('kernel_type', 'vec', 'Kernel type = mat, vec, num')
 # 16 20
-tf.app.flags.DEFINE_integer('embed_size', 20, 'Embedding size')
+tf.app.flags.DEFINE_integer('embed_size', 64, 'Embedding size')
 # tf.app.flags.DEFINE_string('nn_layers', '[["full", 2048],  ["act", "relu"], '
 #                                         '["full", 2048],  ["act", "relu"], '
 #                                         '["full", 2048],  ["act", "relu"], '
@@ -157,6 +159,8 @@ class Trainer:
             self.model_param['init_orth'] = FLAGS.init_orth
             self.model_param['fix_kernel'] = FLAGS.fix_kernel
             self.model_param['l2_kernel'] = FLAGS.l2_kernel
+            self.model_param['linear'] = FLAGS.linear
+            self.model_param['kernel_type'] = FLAGS.kernel_type
         self.dump_config()
 
         tf.reset_default_graph()
