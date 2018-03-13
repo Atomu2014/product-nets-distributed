@@ -24,37 +24,33 @@ tf.app.flags.DEFINE_integer('num_gpus', 1, 'Number of variable partitions')
 tf.app.flags.DEFINE_bool('sparse_grad', False, 'Apply sparse gradient')
 
 tf.app.flags.DEFINE_string('logdir', '../log', 'Directory for storing mnist data')
-tf.app.flags.DEFINE_bool('restore', False, 'Restore from logdir')
-tf.app.flags.DEFINE_bool('val', True, 'If True, use validation set, else use test set')
-tf.app.flags.DEFINE_integer('batch_size', 16, 'Training batch size')
-tf.app.flags.DEFINE_integer('test_batch_size', 512, 'Testing batch size')
-# 1e-4 1e-3
-tf.app.flags.DEFINE_float('learning_rate', 0.2, 'Learning rate')
 tf.app.flags.DEFINE_string('prefix', '', 'Prefix for logdir')
-tf.app.flags.DEFINE_string('loss_mode', 'sum', 'Loss = mean, sum')
-tf.app.flags.DEFINE_string('dataset', 'criteo_challenge', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
+tf.app.flags.DEFINE_bool('restore', False, 'Restore from logdir')
+tf.app.flags.DEFINE_bool('val', False, 'If True, use validation set, else use test set')
 tf.app.flags.DEFINE_float('val_ratio', 0., 'Validation ratio')
-tf.app.flags.DEFINE_string('model', 'kfm', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
-# False True
-tf.app.flags.DEFINE_bool('wide', True, 'Wide term for pin')
-tf.app.flags.DEFINE_bool('prod', True, 'Use product term as sub-net input')
-# False True
-tf.app.flags.DEFINE_bool('input_norm', True, 'Input normalization')
-# False True
-tf.app.flags.DEFINE_bool('init_sparse', True, 'Init sparse layer')
-# False True
-tf.app.flags.DEFINE_bool('init_fused', False, 'Init fused layer')
-tf.app.flags.DEFINE_bool('init_orth', False, 'Init orthogonal kernels')
+
 tf.app.flags.DEFINE_string('optimizer', 'adagrad', 'Optimizer')
 tf.app.flags.DEFINE_float('epsilon', 1e-8, 'Epsilon for adam')
 tf.app.flags.DEFINE_float('init_val', 0.1, 'Initial accumulator value for adagrad')
+tf.app.flags.DEFINE_float('learning_rate', 0.2, 'Learning rate')
+tf.app.flags.DEFINE_string('loss_mode', 'sum', 'Loss = mean, sum')
+
+tf.app.flags.DEFINE_integer('batch_size', 16, 'Training batch size')
+tf.app.flags.DEFINE_integer('test_batch_size', 512, 'Testing batch size')
+tf.app.flags.DEFINE_string('dataset', 'criteo_challenge', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
+tf.app.flags.DEFINE_string('model', 'kfm', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
+
+tf.app.flags.DEFINE_bool('input_norm', True, 'Input normalization')
+tf.app.flags.DEFINE_bool('init_sparse', True, 'Init sparse layer')
+tf.app.flags.DEFINE_bool('init_fused', False, 'Init fused layer')
+
+tf.app.flags.DEFINE_bool('wide', True, 'Wide term for pin')
+tf.app.flags.DEFINE_bool('prod', True, 'Use product term as sub-net input')
 tf.app.flags.DEFINE_float('l2_embed', 2e-5, 'L2 regularization')
 tf.app.flags.DEFINE_float('l2_kernel', 1e-5, 'L2 regularization for kernels')
 tf.app.flags.DEFINE_bool('unit_kernel', False, 'Kernel in unit ball')
 tf.app.flags.DEFINE_bool('fix_kernel', False, 'Fix kernel')
-tf.app.flags.DEFINE_bool('linear', True, 'Linear terms')
 tf.app.flags.DEFINE_string('kernel_type', 'vec', 'Kernel type = mat, vec, num')
-# 16 20
 tf.app.flags.DEFINE_integer('embed_size', 64, 'Embedding size')
 # tf.app.flags.DEFINE_string('nn_layers', '[["full", 2048],  ["act", "relu"], '
 #                                         '["full", 2048],  ["act", "relu"], '
@@ -156,16 +152,13 @@ class Trainer:
             self.model_param['prod'] = FLAGS.prod
         if FLAGS.model in {'kfm', 'kpnn'}:
             self.model_param['unit_kernel'] = FLAGS.unit_kernel
-            self.model_param['init_orth'] = FLAGS.init_orth
             self.model_param['fix_kernel'] = FLAGS.fix_kernel
             self.model_param['l2_kernel'] = FLAGS.l2_kernel
-            self.model_param['linear'] = FLAGS.linear
             self.model_param['kernel_type'] = FLAGS.kernel_type
         self.dump_config()
 
         tf.reset_default_graph()
         self.dataset = as_dataset(FLAGS.dataset)
-        self.tower_grads = []
 
         with tf.device('/gpu:0'):
             with tf.variable_scope(tf.get_variable_scope()):
@@ -286,7 +279,7 @@ class Trainer:
         return time.time() - self.start_time
 
     def get_timedelta(self, eta=None):
-        eta = eta or (time.time() - self.start_time)
+        eta = eta or self.get_elapsed()
         return str(timedelta(seconds=eta))
 
     def dump_config(self):

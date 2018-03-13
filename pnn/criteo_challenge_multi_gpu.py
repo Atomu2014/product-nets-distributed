@@ -20,42 +20,53 @@ from tf_models_share_vars import as_model
 
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_integer('num_shards', 1, 'Number of variable partitions')
-tf.app.flags.DEFINE_integer('num_gpus', 2, 'Number of variable partitions')
+tf.app.flags.DEFINE_integer('num_gpus', 1, 'Number of variable partitions')
 tf.app.flags.DEFINE_bool('sparse_grad', False, 'Apply sparse gradient')
 
 tf.app.flags.DEFINE_string('logdir', '../log', 'Directory for storing mnist data')
-tf.app.flags.DEFINE_bool('restore', False, 'Restore from logdir')
-tf.app.flags.DEFINE_bool('val', True, 'If True, use validation set, else use test set')
-tf.app.flags.DEFINE_integer('batch_size', 1024, 'Training batch size')
-tf.app.flags.DEFINE_integer('test_batch_size', 2048, 'Testing batch size')
-# 1e-4 ~1e-5
-tf.app.flags.DEFINE_float('learning_rate', 1e-4, 'Learning rate')
 tf.app.flags.DEFINE_string('prefix', '', 'Prefix for logdir')
-
-tf.app.flags.DEFINE_string('dataset', 'criteo_challenge', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
+tf.app.flags.DEFINE_bool('restore', False, 'Restore from logdir')
+tf.app.flags.DEFINE_bool('val', False, 'If True, use validation set, else use test set')
 tf.app.flags.DEFINE_float('val_ratio', 0., 'Validation ratio')
-tf.app.flags.DEFINE_string('model', 'pin', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
-tf.app.flags.DEFINE_string('optimizer', 'adam', 'Optimizer')
-# 1e-8 ~ 1e-4
-tf.app.flags.DEFINE_string('epsilon', 1e-8, 'Epsilon for adam')
-tf.app.flags.DEFINE_float('l2_scale', 0, 'L2 regularization')
-# 2 4 6 8 10
-tf.app.flags.DEFINE_integer('embed_size', 10, 'Embedding size')
-# ~ 1000 * 3
-tf.app.flags.DEFINE_string('nn_layers', '[["full", 1000], ["ln", ""],  ["act", "relu"], '
-                                        '["full", 1000], ["ln", ""],  ["act", "relu"], '
-                                        '["full", 1000], ["ln", ""],  ["act", "relu"], '
-                                        '["full", 1]]', 'Network structure')
-# 40 ~ ?
-tf.app.flags.DEFINE_string('sub_nn_layers', '[["full", 40], ["ln", ""], ["act", "relu"], '
-                                            '["full", 5],  ["ln", ""]]', 'Sub-network structure')
 
-tf.app.flags.DEFINE_integer('num_rounds', 3, 'Number of training rounds')
-# ?
-tf.app.flags.DEFINE_integer('eval_level', 5, 'Evaluating frequency level')
-# ?
-tf.app.flags.DEFINE_float('decay', 1, 'Learning rate decay')
-tf.app.flags.DEFINE_integer('log_frequency', 1000, 'Logging frequency')
+tf.app.flags.DEFINE_string('optimizer', 'adagrad', 'Optimizer')
+tf.app.flags.DEFINE_float('epsilon', 1e-8, 'Epsilon for adam')
+tf.app.flags.DEFINE_float('init_val', 0.1, 'Initial accumulator value for adagrad')
+tf.app.flags.DEFINE_float('learning_rate', 0.2, 'Learning rate')
+tf.app.flags.DEFINE_string('loss_mode', 'sum', 'Loss = mean, sum')
+
+tf.app.flags.DEFINE_integer('batch_size', 16, 'Training batch size')
+tf.app.flags.DEFINE_integer('test_batch_size', 512, 'Testing batch size')
+tf.app.flags.DEFINE_string('dataset', 'criteo_challenge', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
+tf.app.flags.DEFINE_string('model', 'kfm', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
+
+tf.app.flags.DEFINE_bool('input_norm', True, 'Input normalization')
+tf.app.flags.DEFINE_bool('init_sparse', True, 'Init sparse layer')
+tf.app.flags.DEFINE_bool('init_fused', False, 'Init fused layer')
+
+tf.app.flags.DEFINE_bool('wide', True, 'Wide term for pin')
+tf.app.flags.DEFINE_bool('prod', True, 'Use product term as sub-net input')
+tf.app.flags.DEFINE_float('l2_embed', 2e-5, 'L2 regularization')
+tf.app.flags.DEFINE_float('l2_kernel', 1e-5, 'L2 regularization for kernels')
+tf.app.flags.DEFINE_bool('unit_kernel', False, 'Kernel in unit ball')
+tf.app.flags.DEFINE_bool('fix_kernel', False, 'Fix kernel')
+tf.app.flags.DEFINE_string('kernel_type', 'vec', 'Kernel type = mat, vec, num')
+tf.app.flags.DEFINE_integer('embed_size', 64, 'Embedding size')
+# tf.app.flags.DEFINE_string('nn_layers', '[["full", 2048],  ["act", "relu"], '
+#                                         '["full", 2048],  ["act", "relu"], '
+#                                         '["full", 2048],  ["act", "relu"], '
+#                                         '["full", 2048],  ["act", "relu"], '
+#                                         '["full", 2048],  ["act", "relu"], '
+#                                         '["full", 1]]', 'Network structure')
+tf.app.flags.DEFINE_string('nn_layers', '', 'Network structure')
+# tf.app.flags.DEFINE_string('sub_nn_layers', '[["full", 60], ["ln", ""], ["act", "relu"], '
+#                                             '["full", 5],  ["ln", ""]]', 'Sub-network structure')
+tf.app.flags.DEFINE_string('sub_nn_layers', '', 'Sub-network structure')
+
+tf.app.flags.DEFINE_integer('num_rounds', 4, 'Number of training rounds')
+tf.app.flags.DEFINE_integer('eval_level', 0, 'Evaluating frequency level')
+tf.app.flags.DEFINE_float('decay', 1., 'Learning rate decay')
+tf.app.flags.DEFINE_integer('log_frequency', 10000, 'Logging frequency')
 
 
 def get_logdir(FLAGS):
@@ -80,15 +91,16 @@ def redirect_stdout(logfile):
     phOut.Start(MyHookOut)
 
 
-def get_optimizer(opt, lr, **kwargs):
+def get_optimizer(opt, lr):
     opt = opt.lower()
-    eps = kwargs['epsilon'] if 'epsilon' in kwargs else 1e-8
+    eps = FLAGS.epsilon
+    init_val = FLAGS.init_val
     if opt == 'sgd' or opt == 'gd':
         return tf.train.GradientDescentOptimizer(learning_rate=lr)
     elif opt == 'adam':
         return tf.train.AdamOptimizer(learning_rate=lr, epsilon=eps)
     elif opt == 'adagrad':
-        return tf.train.AdagradOptimizer(learning_rate=lr)
+        return tf.train.AdagradOptimizer(learning_rate=lr, initial_accumulator_value=init_val)
 
 
 class Trainer:

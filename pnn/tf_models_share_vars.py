@@ -12,6 +12,7 @@ WEIGHTS = [tf.GraphKeys.GLOBAL_VARIABLES, tf.GraphKeys.WEIGHTS]
 EMBEDS = ['EMBEDS']
 KERNELS = WEIGHTS + ['KERNELS']
 NN_WEIGHTS = WEIGHTS + ['NN_WEIGHTS']
+SUB_NN_WEIGHTS = WEIGHTS + ['SUB_NN_WEIGHTS']
 BIASES = [tf.GraphKeys.GLOBAL_VARIABLES, tf.GraphKeys.BIASES]
 
 
@@ -50,6 +51,8 @@ def get_initializer(init_type='xavier', minval=-0.001, maxval=0.001, mean=0, std
         return tf.contrib.layers.xavier_initializer(uniform=True)
     elif init_type == 'orth':
         return tf.orthogonal_initializer(gain=gain)
+    elif init_type == 'identity':
+        return tf.initializer.identity(gain=gain)
     elif init_type == 'uniform':
         return tf.random_uniform_initializer(minval=minval, maxval=maxval)
     elif init_type == 'normal':
@@ -207,11 +210,11 @@ class Model:
             self.xw, self.xv, self.b = None, None, None
             if weight_flag:
                 if not self.init_sparse:
-                    # initializer = get_initializer(init_type=self.init_type)
+                    initializer = get_initializer(init_type=self.init_type)
                     # TODO: check
-                    initializer = get_initializer(init_type='uniform', minval=-0.5, maxval=0.5)
+                    # initializer = get_initializer(init_type='uniform', minval=-0.5, maxval=0.5)
                 else:
-                    # TODO: check this
+                    # TODO: check
                     # maxval = np.sqrt(6 / (self.num_fields + 1))
                     # initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
                     initializer = get_initializer(init_type='uniform', minval=0, maxval=1)
@@ -223,12 +226,12 @@ class Model:
                 tf.add_to_collection('EMBEDS', self.xw)
             if vector_flag:
                 if not self.init_sparse:
-                    # initializer = get_initializer(init_type=self.init_type)
+                    initializer = get_initializer(init_type=self.init_type)
                     # TODO: check
-                    maxval = np.sqrt(1. / self.embed_size)
-                    initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
+                    # maxval = np.sqrt(1. / self.embed_size)
+                    # initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
                 else:
-                    # TODO: check this
+                    # TODO: check
                     # maxval = np.sqrt(6 / (self.num_fields + self.embed_size))
                     # initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
                     initializer = get_initializer(init_type='uniform', minval=0, maxval=np.sqrt(1. / self.embed_size))
@@ -244,8 +247,7 @@ class Model:
                     self.xv /= np.sqrt(self.num_fields)
                 tf.add_to_collection('EMBEDS', self.xv)
             if bias_flag:
-                shape = [1]
-                self.b = tf.get_variable(name='b', shape=shape, dtype=dtype, initializer=get_initializer(init_type=0.),
+                self.b = tf.get_variable(name='b', shape=[1], dtype=dtype, initializer=get_initializer(init_type=0.),
                                          collections=BIASES)
 
     def def_log_loss(self):
@@ -259,16 +261,23 @@ class Model:
                                                                                pos_weight=self.pos_weight))
 
     def def_l2_loss(self):
-        # TODO: support or remove sub_nn_weight, and nn_weight
         self.l2_loss = tf.constant(0.)
         if self.l2_embed > 0:
             embeds = tf.get_collection('EMBEDS')
             if len(embeds) > 0:
                 self.l2_loss += self.l2_embed * tf.add_n([tf.nn.l2_loss(v) for v in embeds])
-        if hasattr(self, 'l2_kernel'):
+        if hasattr(self, 'l2_kernel') and self.l2_kernel > 0:
             kernels = tf.get_collection('KERNELS')
             if len(kernels) > 0:
                 self.l2_loss += self.l2_kernel * tf.add_n([tf.nn.l2_loss(v) for v in kernels])
+        if hasattr(self, 'l2_sub_nn') and self.l2_sub_nn > 0:
+            sub_nn_weights = tf.get_collection('SUB_NN_WEIGHTS')
+            if len(sub_nn_weights) > 0:
+                self.l2_loss += self.l2_sub_nn * tf.add_n([tf.nn.l2_loss(v) for v in sub_nn_weights])
+        if hasattr(self, 'l2_nn') and self.l2_nn > 0:
+            nn_weights = tf.get_collection('NN_WEIGHTS')
+            if len(nn_weights) > 0:
+                self.l2_loss += self.l2_nn * tf.add_n([tf.nn.l2_loss(v) for v in nn_weights])
 
     def def_inner_product(self, ):
         with tf.variable_scope('inner_product'):
@@ -288,26 +297,23 @@ class Model:
         num_pairs = int(self.num_fields * (self.num_fields - 1) / 2)
         with tf.variable_scope('kernel_product'):
             if kernel is None:
-                if self.init_fused:
-                    # TODO: check this
-                    # maxval = np.sqrt(3. / num_pairs / self.embed_size)
-                    maxval = 1 / self.embed_size
-                    initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
-                # elif self.init_orth:
-                #     initializer = get_initializer(init_type='orth')
-                else:
-                    # TODO:
-                    maxval = np.sqrt(1. / self.embed_size)
-                    initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
+                # if self.init_fused:
+                #     # TODO: check
+                #     # maxval = np.sqrt(3. / num_pairs / self.embed_size)
+                #     maxval = 1 / self.embed_size
+                #     initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
+                # else:
+                #     # TODO:
+                #     maxval = np.sqrt(1. / self.embed_size)
+                #     initializer = get_initializer(init_type='uniform', minval=-maxval, maxval=maxval)
                 if kernel_type == 'mat':
                     shape = [self.embed_size, num_pairs, self.embed_size]
+                    initializer = get_initializer(init_type='identity')
                 elif kernel_type == 'vec':
                     shape = [num_pairs, self.embed_size]
-                    # TODO
                     initializer = get_initializer(init_type=1.)
                 else:
                     shape = [num_pairs, 1]
-                    # TODO
                     initializer = get_initializer(init_type=1.)
                 kernel = tf.get_variable(name='kernel', shape=shape, dtype=dtype, initializer=initializer,
                                          collections=KERNELS, trainable=not fix_kernel)
@@ -414,7 +420,7 @@ class Model:
                         else:
                             initializer = get_initializer(init_type=self.init_type)
                         wi = tf.get_variable(name='w', shape=[sh_num, sh_dim, sl_param], dtype=dtype,
-                                             initializer=initializer, collections=NN_WEIGHTS)
+                                             initializer=initializer, collections=SUB_NN_WEIGHTS)
                         bi = tf.get_variable(name='b', shape=[sh_num, 1, sl_param], dtype=dtype,
                                              initializer=get_initializer(init_type=0.), collections=BIASES)
                         self.sh = tf.matmul(self.sh, wi) + bi
@@ -433,7 +439,7 @@ class Model:
                             layer_mean, layer_var = tf.nn.moments(self.sh, axes=axes, keep_dims=True)
                             out_dim = [sh_num, 1, sh_dim] if 'no_share' in sl_param else [sh_dim]
                             scale = tf.get_variable(name='scale', shape=out_dim, dtype=dtype,
-                                                    initializer=get_initializer(init_type=1.), collections=NN_WEIGHTS)
+                                                    initializer=get_initializer(init_type=1.), collections=SUB_NN_WEIGHTS)
                             self.sh = (self.sh - layer_mean) / tf.sqrt(layer_var)
                             self.sh = self.sh * scale
                             if 'no_bias' not in sl_param:
@@ -543,13 +549,11 @@ class FFM(Model):
 class KFM(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, output_dim=1, init_type='xavier', l2_embed=0, l2_kernel=0,
                  unit_kernel=True, loss_type='log_loss', pos_weight=1., num_shards=0, input_norm=False,
-                 init_sparse=False, init_fused=False, loss_mode='mean', init_orth=True, fix_kernel=False, linear=True,
-                 kernel_type='mat'):
+                 init_sparse=False, init_fused=False, loss_mode='mean', fix_kernel=False, kernel_type='mat'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_embed, loss_type, pos_weight, num_shards,
                        input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
         self.l2_kernel = l2_kernel
-        # self.init_orth = init_orth
 
         self.def_placeholder(train_flag=False)
 
@@ -557,10 +561,7 @@ class KFM(Model):
 
         self.def_kernel_product(unit_kernel=unit_kernel, fix_kernel=fix_kernel, kernel_type=kernel_type)
 
-        self.logits = tf.reduce_sum(self.kp, axis=1, keep_dims=True)
-
-        if linear:
-            self.logits += tf.reduce_sum(self.xw, axis=1) + self.b
+        self.logits = tf.reduce_sum(self.kp, axis=1, keep_dims=True) + tf.reduce_sum(self.xw, axis=1) + self.b
 
         self.preds = tf.sigmoid(self.logits)
 
@@ -729,14 +730,12 @@ class IPNN(Model):
 class KPNN(Model):
     def __init__(self, input_dim, num_fields, embed_size=10, nn_layers=None, output_dim=1, init_type='xavier',
                  l2_embed=0, l2_kernel=0, unit_kernel=True, l2_nn=0, loss_type='log_loss', pos_weight=1., num_shards=0,
-                 input_norm=False, init_sparse=False, init_fused=False, loss_mode='mean', init_orth=True,
-                 fix_kernel=False):
+                 input_norm=False, init_sparse=False, init_fused=False, loss_mode='mean', fix_kernel=False, kernel_type='mat'):
         Model.__init__(self, input_dim, num_fields, output_dim, init_type, l2_embed, loss_type, pos_weight, num_shards,
                        input_norm, init_sparse, init_fused, loss_mode)
         self.embed_size = embed_size
         self.l2_kernel = l2_kernel
         self.unit_kernel = unit_kernel
-        self.init_orth = init_orth
         self.fix_kernel = fix_kernel
         self.l2_nn = l2_nn
         self.nn_layers = nn_layers
@@ -745,7 +744,7 @@ class KPNN(Model):
 
         self.embedding_lookup(weight_flag=False, bias_flag=False)
 
-        self.def_kernel_product()
+        self.def_kernel_product(unit_kernel=unit_kernel, fix_kernel=fix_kernel, kernel_type=kernel_type)
 
         self.nn_input = tf.concat([tf.reshape(self.xv, [-1, self.num_fields * self.embed_size]), self.kp], axis=1)
 
