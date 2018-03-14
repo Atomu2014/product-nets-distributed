@@ -37,7 +37,7 @@ tf.app.flags.DEFINE_string('loss_mode', 'sum', 'Loss = mean, sum')
 
 tf.app.flags.DEFINE_integer('batch_size', 16, 'Training batch size')
 tf.app.flags.DEFINE_integer('test_batch_size', 512, 'Testing batch size')
-tf.app.flags.DEFINE_string('dataset', 'criteo_challenge', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
+tf.app.flags.DEFINE_string('dataset', 'avazu', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
 tf.app.flags.DEFINE_string('model', 'kfm', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
 
 tf.app.flags.DEFINE_bool('input_norm', True, 'Input normalization')
@@ -165,6 +165,12 @@ class Trainer:
 
         tf.reset_default_graph()
         self.dataset = as_dataset(FLAGS.dataset)
+
+    def build(self):
+        if FLAGS.num_gpus == 1:
+            self.build_graph()
+        else:
+            self.build_graph_multi_gpu()
 
     def build_graph(self):
         with tf.device('/gpu:0'):
@@ -440,10 +446,7 @@ class Trainer:
 
 def main(_):
     trainer = Trainer()
-    if FLAGS.num_gpus == 0:
-        trainer.build_graph()
-    else:
-        trainer.build_graph_multi_gpu()
+    trainer.build()
     trainer.train()
 
 
