@@ -223,12 +223,8 @@ class Trainer:
 
             self.begin_step = self.global_step.eval(self.sess)
             self.step = self.begin_step
-            self.local_step = self.begin_step
             self.start_time = time.time()
 
-            # print('Init evaluation')
-            # if FLAGS.val_ratio > 0:
-            #     self.evaluate(self.valid_gen)
             prev_loss = 100000
 
             for r in range(1, FLAGS.num_rounds + 1):

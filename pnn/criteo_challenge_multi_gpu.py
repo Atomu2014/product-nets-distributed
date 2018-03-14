@@ -44,24 +44,16 @@ tf.app.flags.DEFINE_bool('input_norm', True, 'Input normalization')
 tf.app.flags.DEFINE_bool('init_sparse', True, 'Init sparse layer')
 tf.app.flags.DEFINE_bool('init_fused', False, 'Init fused layer')
 
-tf.app.flags.DEFINE_bool('wide', True, 'Wide term for pin')
-tf.app.flags.DEFINE_bool('prod', True, 'Use product term as sub-net input')
+tf.app.flags.DEFINE_integer('embed_size', 64, 'Embedding size')
+tf.app.flags.DEFINE_string('nn_layers', '[' + '["full", 2048],  ["act", "relu"], '*5 + '["full", 1]]', 'Network structure')
+tf.app.flags.DEFINE_string('sub_nn_layers', '[["full", 60], ["ln", ""], ["act", "relu"], ["full", 5],  ["ln", ""]]', 'Sub-network structure')
 tf.app.flags.DEFINE_float('l2_embed', 2e-5, 'L2 regularization')
 tf.app.flags.DEFINE_float('l2_kernel', 1e-5, 'L2 regularization for kernels')
+tf.app.flags.DEFINE_bool('wide', True, 'Wide term for pin')
+tf.app.flags.DEFINE_bool('prod', True, 'Use product term as sub-net input')
+tf.app.flags.DEFINE_string('kernel_type', 'vec', 'Kernel type = mat, vec, num')
 tf.app.flags.DEFINE_bool('unit_kernel', False, 'Kernel in unit ball')
 tf.app.flags.DEFINE_bool('fix_kernel', False, 'Fix kernel')
-tf.app.flags.DEFINE_string('kernel_type', 'vec', 'Kernel type = mat, vec, num')
-tf.app.flags.DEFINE_integer('embed_size', 64, 'Embedding size')
-# tf.app.flags.DEFINE_string('nn_layers', '[["full", 2048],  ["act", "relu"], '
-#                                         '["full", 2048],  ["act", "relu"], '
-#                                         '["full", 2048],  ["act", "relu"], '
-#                                         '["full", 2048],  ["act", "relu"], '
-#                                         '["full", 2048],  ["act", "relu"], '
-#                                         '["full", 1]]', 'Network structure')
-tf.app.flags.DEFINE_string('nn_layers', '', 'Network structure')
-# tf.app.flags.DEFINE_string('sub_nn_layers', '[["full", 60], ["ln", ""], ["act", "relu"], '
-#                                             '["full", 5],  ["ln", ""]]', 'Sub-network structure')
-tf.app.flags.DEFINE_string('sub_nn_layers', '', 'Sub-network structure')
 
 tf.app.flags.DEFINE_integer('num_rounds', 4, 'Number of training rounds')
 tf.app.flags.DEFINE_integer('eval_level', 0, 'Evaluating frequency level')
@@ -103,6 +95,19 @@ def get_optimizer(opt, lr):
         return tf.train.AdagradOptimizer(learning_rate=lr, initial_accumulator_value=init_val)
 
 
+def sparse_grads_mean(grads_and_vars):
+    indices = []
+    values = []
+    dense_shape = grads_and_vars[0][0].dense_shape
+    n = len(grads_and_vars)
+    for g, _ in grads_and_vars:
+        indices.append(g.indices)
+        values.append(g.values / n)
+    indices = tf.concat(indices, axis=0)
+    values = tf.concat(values, axis=0)
+    return tf.IndexedSlices(values=values, indices=indices, dense_shape=dense_shape)
+
+
 class Trainer:
     def __init__(self):
         self.config = {}
@@ -115,57 +120,86 @@ class Trainer:
         self.train_data_param = {
             'gen_type': 'train',
             'random_sample': True,
-            'batch_size': FLAGS.batch_size,
+            # TODO
+            'batch_size': FLAGS.batch_size * FLAGS.num_gpus,
             'squeeze_output': False,
             'val_ratio': FLAGS.val_ratio,
         }
         self.valid_data_param = {
             'gen_type': 'valid' if FLAGS.val else 'test',
             'random_sample': False,
-            'batch_size': FLAGS.test_batch_size,
+            'batch_size': FLAGS.test_batch_size * FLAGS.num_gpus,
             'squeeze_output': False,
             'val_ratio': FLAGS.val_ratio,
         }
         self.test_data_param = {
             'gen_type': 'test',
             'random_sample': False,
-            'batch_size': FLAGS.test_batch_size,
+            'batch_size': FLAGS.test_batch_size * FLAGS.num_gpus,
             'squeeze_output': False,
         }
         self.train_logdir = os.path.join(self.logdir, 'train', self.worker_dir)
         self.valid_logdir = os.path.join(self.logdir, 'valid', self.worker_dir)
         self.test_logdir = os.path.join(self.logdir, 'test', self.worker_dir)
-        gpu_config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False,
+        self.gpu_config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False,
                                     gpu_options={'allow_growth': True})
 
-        self.model_param = {'l2_scale': FLAGS.l2_scale, 'num_shards': FLAGS.num_shards}
+        self.model_param = {'l2_embed': FLAGS.l2_embed, 'num_shards': FLAGS.num_shards, 'input_norm': FLAGS.input_norm,
+                            'init_sparse': FLAGS.init_sparse, 'init_fused': FLAGS.init_fused,
+                            'loss_mode': FLAGS.loss_mode}
         if FLAGS.model != 'lr':
             self.model_param['embed_size'] = FLAGS.embed_size
         if FLAGS.model in ['fnn', 'ccpm', 'deepfm', 'ipnn', 'kpnn', 'pin']:
             self.model_param['nn_layers'] = [tuple(x) for x in json.loads(FLAGS.nn_layers)]
         if FLAGS.model in ['nfm', 'pin']:
             self.model_param['sub_nn_layers'] = [tuple(x) for x in json.loads(FLAGS.sub_nn_layers)]
+        if FLAGS.model == 'pin':
+            self.model_param['wide'] = FLAGS.wide
+            self.model_param['prod'] = FLAGS.prod
+        if FLAGS.model in {'kfm', 'kpnn'}:
+            self.model_param['unit_kernel'] = FLAGS.unit_kernel
+            self.model_param['fix_kernel'] = FLAGS.fix_kernel
+            self.model_param['l2_kernel'] = FLAGS.l2_kernel
+            self.model_param['kernel_type'] = FLAGS.kernel_type
         self.dump_config()
 
         tf.reset_default_graph()
         self.dataset = as_dataset(FLAGS.dataset)
+
+    def build_graph(self):
+        with tf.device('/gpu:0'):
+            with tf.variable_scope(tf.get_variable_scope()):
+                self.global_step = tf.get_variable(name='global_step', dtype=tf.int32, shape=[],
+                                                   initializer=tf.constant_initializer(1), trainable=False)
+                self.learning_rate = tf.get_variable(name='learning_rate', dtype=tf.float32, shape=[],
+                                                     initializer=tf.constant_initializer(
+                                                         FLAGS.learning_rate),
+                                                     trainable=False)
+                self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate)
+                self.model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
+                                      num_fields=self.dataset.num_fields,
+                                      **self.model_param)
+                tf.get_variable_scope().reuse_variables()
+
+            self.train_op = self.opt.minimize(self.model.loss, global_step=self.global_step)
+            self.saver = tf.train.Saver()
+
+    def build_graph_multi_gpu(self):
         self.tower_grads = []
         self.models = []
 
         with tf.device('/gpu:0'):
             num_gpus = FLAGS.num_gpus
             with tf.variable_scope(tf.get_variable_scope()):
+                self.global_step = tf.get_variable(name='global_step', dtype=tf.int32, shape=[],
+                                                    initializer=tf.constant_initializer(1), trainable=False)
+                self.learning_rate = tf.get_variable(name='learning_rate', dtype=tf.float32, shape=[],
+                                                    initializer=tf.constant_initializer(FLAGS.learning_rate),
+                                                    trainable=False)
+                self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate, epsilon=FLAGS.epsilon)
                 for i in xrange(num_gpus):
                     with tf.device('/gpu:%d' % i):
                         print('Deploying gpu:%d ...' % i)
-                        if i == 0:
-                            self.global_step = tf.get_variable(name='global_step', dtype=tf.int32, shape=[],
-                                                               initializer=tf.constant_initializer(1), trainable=False)
-                            self.learning_rate = tf.get_variable(name='learning_rate', dtype=tf.float32, shape=[],
-                                                                 initializer=tf.constant_initializer(
-                                                                     FLAGS.learning_rate),
-                                                                 trainable=False)
-                            self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate, epsilon=FLAGS.epsilon)
                         with tf.name_scope('tower_%d' % i):
                             model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
                                              num_fields=self.dataset.num_fields,
@@ -175,21 +209,8 @@ class Trainer:
                             grads = self.opt.compute_gradients(model.loss)
                             self.tower_grads.append(grads)
 
-            def sparse_grads_mean(grads_and_vars):
-                indices = []
-                values = []
-                dense_shape = grads_and_vars[0][0].dense_shape
-                n = len(grads_and_vars)
-                for g, _ in grads_and_vars:
-                    indices.append(g.indices)
-                    values.append(g.values / n)
-                indices = tf.concat(indices, axis=0)
-                values = tf.concat(values, axis=0)
-                return tf.IndexedSlices(values=values, indices=indices, dense_shape=dense_shape)
-
-            average_grads = []
-
             print('###################################')
+            average_grads = []
             for grad_and_vars in zip(*self.tower_grads):
                 grads = []
                 # TODO test this
@@ -211,21 +232,20 @@ class Trainer:
             # TODO test this
             # self.grad_op = tf.group([(x[0].op, x[1].op) for x in average_grads])
             self.update_op = self.opt.apply_gradients(average_grads, global_step=self.global_step)
-
             self.train_op = self.opt.apply_gradients(average_grads, global_step=self.global_step)
             self.saver = tf.train.Saver()
 
-        def sess_op():
-            return tf.Session(config=gpu_config)
+    def sess_op(self):
+        return tf.Session(config=self.gpu_config)
 
-        num_gpus = FLAGS.num_gpus
+    def train(self):
         train_size = int(self.dataset.train_size * (1 - FLAGS.val_ratio))
-        self.num_steps = int(np.ceil(train_size / FLAGS.batch_size / num_gpus))
+        self.num_steps = int(np.ceil(train_size / FLAGS.batch_size / FLAGS.num_gpus))
         self.eval_steps = int(np.ceil(self.num_steps / FLAGS.eval_level)) if FLAGS.eval_level else 0
 
-        with sess_op() as self.sess:
+        with self.sess_op() as self.sess:
             print('Train size = %d, Batch size = %d, GPUs = %d' %
-                  (self.dataset.train_size, FLAGS.batch_size, num_gpus))
+                  (self.dataset.train_size, FLAGS.batch_size, FLAGS.num_gpus))
             print('%d rounds in total, One round = %d steps, One evaluation = %d steps' %
                   (FLAGS.num_rounds, self.num_steps, self.eval_steps))
 
@@ -251,7 +271,6 @@ class Trainer:
 
             self.begin_step = self.global_step.eval(self.sess)
             self.step = self.begin_step
-            self.local_step = self.begin_step
             self.start_time = time.time()
 
             print('Init evaluation')
@@ -261,24 +280,24 @@ class Trainer:
 
             for r in range(1, FLAGS.num_rounds + 1):
                 print('Round: %d' % r)
-                train_iter = iter(self.train_gen)
-                while True:
+                for batch_xs, batch_ys in self.train_gen:
                     fetches = []
                     train_feed = {}
-                    try:
-                        for model in self.models:
-                            batch_xs, batch_ys = train_iter.next()
-                            fetches += [model.loss, model.log_loss, model.l2_loss]
-                            train_feed[model.inputs] = batch_xs
-                            train_feed[model.labels] = batch_ys
-                            if model.training is not None:
-                                train_feed[model.training] = True
-                    except StopIteration:
-                        break
+                    if len(batch_ys) < FLAGS.num_gpus:
+                        continue
+                    _split = range(0, len(batch_ys), int(len(batch_ys) / FLAGS.num_gpus))
+                    batch_xs = np.split(batch_xs, _split)
+                    batch_ys = np.split(batch_ys, _split)
+                    for i, model in enumerate(self.models):
+                        _xs, _ys = batch_xs[i], batch_ys[i]
+                        fetches += [model.loss, model.log_loss, model.l2_loss]
+                        train_feed[model.inputs] = _xs
+                        train_feed[model.labels] = _ys
+                        if model.training is not None:
+                            train_feed[model.training] = True
 
                     ret = self.sess.run(fetches=[self.train_op, self.global_step] + fetches,
                                         feed_dict=train_feed, )
-                    self.local_step += 1
                     self.step = ret[1]
                     _loss_ = sum([ret[i] for i in range(2, len(ret), 3)]) / FLAGS.num_gpus
                     _log_loss_ = sum([ret[i] for i in range(3, len(ret), 3)]) / FLAGS.num_gpus
@@ -347,43 +366,33 @@ class Trainer:
         labels = []
         preds = []
         start_time = time.time()
-        _iter = iter(gen)
-        flag = True
-        cnt = 0
-        if gen.gen_type == 'test':
-            gen_size = self.dataset.test_size
-        elif gen.gen_type == 'valid':
-            gen_size = int(self.dataset.train_size * gen.val_ratio)
-        elif gen.gen_type == 'train':
-            gen_size = int(self.dataset.train_size * (1 - gen.val_ratio))
-        total_step = gen_size / gen.batch_size
-        while flag:
-            fetches = []
-            feed_dict = {}
-            for model in self.models:
-                try:
-                    xs, ys = _iter.next()
-                    cnt += 1
+        if FLAGS.num_gpus == 1:
+            for xs, ys in gen:
+                feed_dict = {self.model.inputs: xs, self.model.labels: ys}
+                if self.model.training is not None:
+                    feed_dict[self.model.training] = False
+                _preds_ = self.sess.run(fetches=self.model.preds, feed_dict=feed_dict)
+                labels.append(ys.flatten())
+                preds.append(_preds_.flatten())
+        else:
+            for batch_xs, batch_ys in gen:
+                fetches = []
+                feed_dict = {}
+                if len(batch_ys) < FLAGS.num_gpus:
+                    continue
+                _split = range(0, len(batch_ys), int(len(batch_ys) / FLAGS.num_gpus))
+                batch_xs = np.split(batch_xs, _split)
+                batch_ys = np.split(batch_ys, _split)
+                for i, model in enumerate(self.models):
+                    xs, ys = batch_xs[i], batch_ys[i]
                     fetches.append(model.preds)
                     feed_dict[model.inputs] = xs
                     feed_dict[model.labels] = ys
                     labels.append(ys.flatten())
                     if model.training is not None:
                         feed_dict[model.training] = False
-                except StopIteration:
-                    flag = False
-                    break
-            if cnt % FLAGS.log_frequency == 0:
-                elapsed = time.time() - start_time
-                print('Eval step: %d / %d, Elapsed: %s' % (cnt, total_step, self.get_timedelta(elapsed)))
-            if len(feed_dict):
                 _preds_ = self.sess.run(fetches=fetches, feed_dict=feed_dict)
-                if type(_preds_) is list:
-                    preds.extend([x.flatten() for x in _preds_])
-                else:
-                    preds.append(_preds_.flatten())
-        elapsed = time.time() - start_time
-        print('Eval step: %d / %d, Elapsed: %s' % (cnt, total_step, self.get_timedelta(elapsed)))
+                preds.extend([x.flatten() for x in _preds_])
         labels = np.hstack(labels)
         preds = np.hstack(preds)
         _min_ = len(np.where(preds < eps)[0])
@@ -412,7 +421,12 @@ class Trainer:
 
 
 def main(_):
-    Trainer()
+    trainer = Trainer()
+    if FLAGS.num_gpus == 0:
+        trainer.build_graph()
+    else:
+        trainer.build_graph_multi_gpu()
+    trainer.train()
 
 
 if __name__ == '__main__':
