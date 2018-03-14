@@ -32,13 +32,13 @@ tf.app.flags.DEFINE_float('val_ratio', 0., 'Validation ratio')
 tf.app.flags.DEFINE_string('optimizer', 'adagrad', 'Optimizer')
 tf.app.flags.DEFINE_float('epsilon', 1e-8, 'Epsilon for adam')
 tf.app.flags.DEFINE_float('init_val', 0.1, 'Initial accumulator value for adagrad')
-tf.app.flags.DEFINE_float('learning_rate', 0.2, 'Learning rate')
-tf.app.flags.DEFINE_string('loss_mode', 'sum', 'Loss = mean, sum')
+tf.app.flags.DEFINE_float('learning_rate', 0.1, 'Learning rate')
+tf.app.flags.DEFINE_string('loss_mode', 'mean', 'Loss = mean, sum')
 
-tf.app.flags.DEFINE_integer('batch_size', 16, 'Training batch size')
-tf.app.flags.DEFINE_integer('test_batch_size', 512, 'Testing batch size')
+tf.app.flags.DEFINE_integer('batch_size', 1024, 'Training batch size')
+tf.app.flags.DEFINE_integer('test_batch_size', 10240, 'Testing batch size')
 tf.app.flags.DEFINE_string('dataset', 'avazu', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
-tf.app.flags.DEFINE_string('model', 'kfm', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
+tf.app.flags.DEFINE_string('model', 'lr', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
 
 tf.app.flags.DEFINE_bool('input_norm', True, 'Input normalization')
 tf.app.flags.DEFINE_bool('init_sparse', True, 'Init sparse layer')
@@ -56,9 +56,9 @@ tf.app.flags.DEFINE_bool('unit_kernel', False, 'Kernel in unit ball')
 tf.app.flags.DEFINE_bool('fix_kernel', False, 'Fix kernel')
 
 tf.app.flags.DEFINE_integer('num_rounds', 4, 'Number of training rounds')
-tf.app.flags.DEFINE_integer('eval_level', 0, 'Evaluating frequency level')
+tf.app.flags.DEFINE_integer('eval_level', 5, 'Evaluating frequency level')
 tf.app.flags.DEFINE_float('decay', 1., 'Learning rate decay')
-tf.app.flags.DEFINE_integer('log_frequency', 10000, 'Logging frequency')
+tf.app.flags.DEFINE_integer('log_frequency', 1000, 'Logging frequency')
 
 
 def get_logdir(FLAGS):
@@ -279,8 +279,6 @@ class Trainer:
             self.step = self.begin_step
             self.start_time = time.time()
 
-            prev_loss = 100000
-
             for r in range(1, FLAGS.num_rounds + 1):
                 print('Round: %d' % r)
                 for batch_xs, batch_ys in self.train_gen:
@@ -306,19 +304,12 @@ class Trainer:
                         print('Round: %d, Eval: %d / %d, AvgTime: %3.2fms, Elapsed: %.2fs, ETA: %s' %
                               (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / self.step),
                                elapsed_time, self.get_timedelta(eta=eta)))
-                        if FLAGS.val_ratio > 0:
-                            _val_loss_, _ = self.evaluate(self.valid_gen, self.valid_writer)
+                        _val_loss_, _ = self.evaluate(self.valid_gen, self.valid_writer)
                         self.learning_rate.assign(self.learning_rate * FLAGS.decay)
 
                 self.saver.save(self.sess, os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
                 print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
                 self.evaluate(self.test_gen, submission=r)
-                if FLAGS.val_ratio > 0:
-                    if _val_loss_ > prev_loss:
-                        print('Early stop at round %d' % r)
-                        return
-                    else:
-                        prev_loss = _val_loss_
 
     def get_elapsed(self):
         return time.time() - self.start_time
@@ -415,7 +406,7 @@ class Trainer:
         start_time = time.time()
         for batch_xs, batch_ys in gen:
             if FLAGS.num_gpus == 1 or len(batch_ys) >= FLAGS.num_gpus:
-                labels.append(batch_ys)
+                labels.append(batch_ys.flatten())
                 preds.extend(self.evaluate_batch(batch_xs, batch_ys))
         labels = np.hstack(labels)
         preds = np.hstack(preds)
