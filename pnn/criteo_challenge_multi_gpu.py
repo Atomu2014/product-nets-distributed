@@ -176,7 +176,7 @@ class Trainer:
         with tf.device('/gpu:0'):
             with tf.variable_scope(tf.get_variable_scope()):
                 self.global_step = tf.get_variable(name='global_step', dtype=tf.int32, shape=[],
-                                                   initializer=tf.constant_initializer(1), trainable=False)
+                                                   initializer=tf.constant_initializer(0), trainable=False)
                 self.learning_rate = tf.get_variable(name='learning_rate', dtype=tf.float32, shape=[],
                                                      initializer=tf.constant_initializer(
                                                          FLAGS.learning_rate),
@@ -198,7 +198,7 @@ class Trainer:
             num_gpus = FLAGS.num_gpus
             with tf.variable_scope(tf.get_variable_scope()):
                 self.global_step = tf.get_variable(name='global_step', dtype=tf.int32, shape=[],
-                                                    initializer=tf.constant_initializer(1), trainable=False)
+                                                    initializer=tf.constant_initializer(0), trainable=False)
                 self.learning_rate = tf.get_variable(name='learning_rate', dtype=tf.float32, shape=[],
                                                     initializer=tf.constant_initializer(FLAGS.learning_rate),
                                                     trainable=False)
@@ -245,16 +245,7 @@ class Trainer:
         return tf.Session(config=self.gpu_config)
 
     def train(self):
-        train_size = int(self.dataset.train_size * (1 - FLAGS.val_ratio))
-        self.num_steps = int(np.ceil(train_size / FLAGS.batch_size / FLAGS.num_gpus))
-        self.eval_steps = int(np.ceil(self.num_steps / FLAGS.eval_level)) if FLAGS.eval_level else 0
-
         with self.sess_op() as self.sess:
-            print('Train size = %d, Batch size = %d, GPUs = %d' %
-                  (self.dataset.train_size, FLAGS.batch_size, FLAGS.num_gpus))
-            print('%d rounds in total, One round = %d steps, One evaluation = %d steps' %
-                  (FLAGS.num_rounds, self.num_steps, self.eval_steps))
-
             self.train_gen = self.dataset.batch_generator(self.train_data_param)
             self.valid_gen = self.dataset.batch_generator(self.valid_data_param)
             self.test_gen = self.dataset.batch_generator(self.test_data_param)
@@ -262,6 +253,21 @@ class Trainer:
             self.train_writer = tf.summary.FileWriter(logdir=self.train_logdir, graph=self.sess.graph, flush_secs=30)
             self.test_writer = tf.summary.FileWriter(logdir=self.test_logdir, graph=self.sess.graph, flush_secs=30)
             self.valid_writer = tf.summary.FileWriter(logdir=self.valid_logdir, graph=self.sess.graph, flush_secs=30)
+
+            # train_size = int(self.dataset.train_size * (1 - FLAGS.val_ratio))
+            # self.num_steps = int(np.ceil(train_size / FLAGS.batch_size / FLAGS.num_gpus))
+            print('checking dataset...')
+            self.train_size = 0
+            self.num_steps = 0
+            for _x, _y in self.train_gen:
+                self.train_size += len(_y)
+                self.num_steps += 1
+            self.eval_steps = int(np.ceil(self.num_steps / FLAGS.eval_level)) if FLAGS.eval_level else 0
+
+            print('Train size = %d, Batch size = %d, GPUs = %d' %
+                  (self.train_size, FLAGS.batch_size, FLAGS.num_gpus))
+            print('%d rounds in total, One round = %d steps, One evaluation = %d steps' %
+                  (FLAGS.num_rounds, self.num_steps, self.eval_steps))
 
             if not FLAGS.restore:
                 self.sess.run(tf.global_variables_initializer())
@@ -304,12 +310,12 @@ class Trainer:
                         print('Round: %d, Eval: %d / %d, AvgTime: %3.2fms, Elapsed: %.2fs, ETA: %s' %
                               (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / self.step),
                                elapsed_time, self.get_timedelta(eta=eta)))
-                        _val_loss_, _ = self.evaluate(self.valid_gen, self.valid_writer)
+                        self.evaluate(self.valid_gen, self.valid_writer)
                         self.learning_rate.assign(self.learning_rate * FLAGS.decay)
 
                 self.saver.save(self.sess, os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
                 print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
-                self.evaluate(self.test_gen, submission=r)
+                self.evaluate(self.test_gen, self.test_writer, submission=0)
 
     def get_elapsed(self):
         return time.time() - self.start_time
@@ -404,16 +410,18 @@ class Trainer:
         preds = []
         start_time = time.time()
         for batch_xs, batch_ys in gen:
-            if FLAGS.num_gpus == 1 or len(batch_ys) >= FLAGS.num_gpus:
-                labels.append(batch_ys.flatten())
-                preds.extend(self.evaluate_batch(batch_xs, batch_ys))
+            if len(batch_ys) < FLAGS.num_gpus:
+                break
+            labels.append(batch_ys.flatten())
+            preds.extend(self.evaluate_batch(batch_xs, batch_ys))
         labels = np.hstack(labels)
         preds = np.hstack(preds)
         _min_ = len(np.where(preds < eps)[0])
         _max_ = len(np.where(preds > 1 - eps)[0])
         print('%d samples are evaluated' % len(labels))
-        print('EPS: %g, %d (%.2f) < eps, %d (%.2f) > 1-eps, %d (%.2f) are truncated' %
-              (eps, _min_, _min_ / len(preds), _max_, _max_ / len(preds), _min_ + _max_, (_min_ + _max_) / len(preds)))
+        if _min_ + _max_ > 0:
+            print('EPS: %g, %d (%.2f) < eps, %d (%.2f) > 1-eps, %d (%.2f) are truncated' %
+                (eps, _min_, _min_ / len(preds), _max_, _max_ / len(preds), _min_ + _max_, (_min_ + _max_) / len(preds)))
         preds[preds < eps] = eps
         preds[preds > 1 - eps] = 1 - eps
         if not submission:
