@@ -273,35 +273,12 @@ class Trainer:
             self.step = self.begin_step
             self.start_time = time.time()
 
-            print('Init evaluation')
-            if FLAGS.val_ratio > 0:
-                self.evaluate(self.valid_gen)
             prev_loss = 100000
 
             for r in range(1, FLAGS.num_rounds + 1):
                 print('Round: %d' % r)
                 for batch_xs, batch_ys in self.train_gen:
-                    fetches = []
-                    train_feed = {}
-                    if len(batch_ys) < FLAGS.num_gpus:
-                        continue
-                    _split = range(0, len(batch_ys), int(len(batch_ys) / FLAGS.num_gpus))
-                    batch_xs = np.split(batch_xs, _split)
-                    batch_ys = np.split(batch_ys, _split)
-                    for i, model in enumerate(self.models):
-                        _xs, _ys = batch_xs[i], batch_ys[i]
-                        fetches += [model.loss, model.log_loss, model.l2_loss]
-                        train_feed[model.inputs] = _xs
-                        train_feed[model.labels] = _ys
-                        if model.training is not None:
-                            train_feed[model.training] = True
-
-                    ret = self.sess.run(fetches=[self.train_op, self.global_step] + fetches,
-                                        feed_dict=train_feed, )
-                    self.step = ret[1]
-                    _loss_ = sum([ret[i] for i in range(2, len(ret), 3)]) / FLAGS.num_gpus
-                    _log_loss_ = sum([ret[i] for i in range(3, len(ret), 3)]) / FLAGS.num_gpus
-                    _l2_loss_ = sum([ret[i] for i in range(4, len(ret), 3)]) / FLAGS.num_gpus
+                    self.step, _loss_, _log_loss_, _l2_loss_ = self.train_batch(batch_xs, batch_ys)
 
                     if self.step % FLAGS.log_frequency == 0:
                         elapsed_time = self.get_elapsed()
@@ -362,37 +339,76 @@ class Trainer:
         print('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
         open(path_json, 'w').write(config_json)
 
+    def train_batch(self, batch_xs, batch_ys):
+        if FLAGS.num_gpus == 1:
+            fetches = [self.train_op, self.global_step]
+            train_feed = {}
+            fetches += [self.model.loss, self.model.log_loss, self.model.l2_loss]
+            train_feed[self.model.inputs] = batch_xs
+            train_feed[self.model.labels] = batch_ys
+            if self.model.training is not None:
+                train_feed[self.model.training] = True
+
+            _, step, _loss_, _log_loss_, _l2_loss_ = self.sess.run(fetches=fetches, feed_dict=train_feed)
+        else:
+            fetches = []
+            train_feed = {}
+            if len(batch_ys) < FLAGS.num_gpus:
+                continue
+            _split = range(0, len(batch_ys), int(len(batch_ys) / FLAGS.num_gpus))
+            batch_xs = np.split(batch_xs, _split)
+            batch_ys = np.split(batch_ys, _split)
+            for i, model in enumerate(self.models):
+                _xs, _ys = batch_xs[i], batch_ys[i]
+                fetches += [model.loss, model.log_loss, model.l2_loss]
+                train_feed[model.inputs] = _xs
+                train_feed[model.labels] = _ys
+                if model.training is not None:
+                    train_feed[model.training] = True
+
+            ret = self.sess.run(fetches=[self.train_op, self.global_step] + fetches,
+                                feed_dict=train_feed, )
+            step = ret[1]
+            _loss_ = sum([ret[i] for i in range(2, len(ret), 3)]) / FLAGS.num_gpus
+            _log_loss_ = sum([ret[i] for i in range(3, len(ret), 3)]) / FLAGS.num_gpus
+            _l2_loss_ = sum([ret[i] for i in range(4, len(ret), 3)]) / FLAGS.num_gpus
+        return step, _loss_, _log_loss_, _l2_loss_
+
+    def evaluate_batch(self, batch_xs, batch_ys):
+        if FLAGS.num_gpus == 1:
+            feed_dict = {self.model.inputs: batch_xs, self.model.labels: batch_ys}
+            if self.model.training is not None:
+                feed_dict[self.model.training] = False
+            _preds_ = self.sess.run(fetches=self.model.preds, feed_dict=feed_dict)
+            batch_preds = [_preds_.flatten()]
+        else:
+            fetches = []
+            feed_dict = {}
+            if len(batch_ys) < FLAGS.num_gpus:
+                return [], []
+            _split = range(0, len(batch_ys), int(len(batch_ys) / FLAGS.num_gpus))
+            batch_xs = np.split(batch_xs, _split)
+            batch_ys = np.split(batch_ys, _split)
+            for i, model in enumerate(self.models):
+                xs, ys = batch_xs[i], batch_ys[i]
+                fetches.append(model.preds)
+                feed_dict[model.inputs] = xs
+                feed_dict[model.labels] = ys
+                labels.append(ys.flatten())
+                if model.training is not None:
+                    feed_dict[model.training] = False
+            _preds_ = self.sess.run(fetches=fetches, feed_dict=feed_dict)
+            batch_preds = [x.flatten() for x in _preds_]
+        return batch_preds
+
     def evaluate(self, gen, writer=None, eps=1e-6, submission=0):
         labels = []
         preds = []
         start_time = time.time()
-        if FLAGS.num_gpus == 1:
-            for xs, ys in gen:
-                feed_dict = {self.model.inputs: xs, self.model.labels: ys}
-                if self.model.training is not None:
-                    feed_dict[self.model.training] = False
-                _preds_ = self.sess.run(fetches=self.model.preds, feed_dict=feed_dict)
-                labels.append(ys.flatten())
-                preds.append(_preds_.flatten())
-        else:
-            for batch_xs, batch_ys in gen:
-                fetches = []
-                feed_dict = {}
-                if len(batch_ys) < FLAGS.num_gpus:
-                    continue
-                _split = range(0, len(batch_ys), int(len(batch_ys) / FLAGS.num_gpus))
-                batch_xs = np.split(batch_xs, _split)
-                batch_ys = np.split(batch_ys, _split)
-                for i, model in enumerate(self.models):
-                    xs, ys = batch_xs[i], batch_ys[i]
-                    fetches.append(model.preds)
-                    feed_dict[model.inputs] = xs
-                    feed_dict[model.labels] = ys
-                    labels.append(ys.flatten())
-                    if model.training is not None:
-                        feed_dict[model.training] = False
-                _preds_ = self.sess.run(fetches=fetches, feed_dict=feed_dict)
-                preds.extend([x.flatten() for x in _preds_])
+        for batch_xs, batch_ys in gen:
+            if FLAGS.num_gpus == 1 or len(batch_ys) >= FLAGS.num_gpus:
+                labels.append(batch_ys)
+                preds.extend(self.evaluate_batch(batch_xs, batch_ys))
         labels = np.hstack(labels)
         preds = np.hstack(preds)
         _min_ = len(np.where(preds < eps)[0])
