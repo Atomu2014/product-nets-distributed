@@ -278,6 +278,10 @@ class Trainer:
             for r in range(1, FLAGS.num_rounds + 1):
                 print('Round: %d' % r)
                 for batch_xs, batch_ys in self.train_gen:
+                    # TODO: check
+                    if len(batch_ys) < FLAGS.num_gpus:
+                        break
+
                     self.step, _loss_, _log_loss_, _l2_loss_ = self.train_batch(batch_xs, batch_ys)
 
                     if self.step % FLAGS.log_frequency == 0:
@@ -353,8 +357,6 @@ class Trainer:
         else:
             fetches = []
             train_feed = {}
-            if len(batch_ys) < FLAGS.num_gpus:
-                continue
             _split = range(0, len(batch_ys), int(len(batch_ys) / FLAGS.num_gpus))
             batch_xs = np.split(batch_xs, _split)
             batch_ys = np.split(batch_ys, _split)
