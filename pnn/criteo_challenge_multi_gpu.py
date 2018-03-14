@@ -296,7 +296,7 @@ class Trainer:
 
                     if self.step % FLAGS.log_frequency == 0:
                         elapsed_time = self.get_elapsed()
-                        print('Done step %d, Elapsed: %.2fs, Train-Loss: %.4f, Log-Loss: %.4f, L2-Loss: %g'
+                        print('Done step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
                               % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
                         summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=_loss_),
                                                     tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
@@ -307,7 +307,7 @@ class Trainer:
                         elapsed_time = self.get_elapsed()
                         eta = FLAGS.num_rounds * self.num_steps / (self.step - self.begin_step) * elapsed_time
                         eval_times = self.step % self.num_steps // self.eval_steps or FLAGS.eval_level
-                        print('Round: %d, Eval: %d / %d, AvgTime: %3.2fms, Elapsed: %.2fs, ETA: %s' %
+                        print('Round: %d, Eval: %d / %d, AvgTime: %.2fms, Elapsed: %.2fs, ETA: %s' %
                               (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / self.step),
                                elapsed_time, self.get_timedelta(eta=eta)))
                         self.evaluate(self.valid_gen, self.valid_writer)
@@ -315,7 +315,6 @@ class Trainer:
 
                 self.saver.save(self.sess, os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
                 print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
-                self.evaluate(self.test_gen, self.test_writer, submission=0)
 
     def get_elapsed(self):
         return time.time() - self.start_time
@@ -427,7 +426,7 @@ class Trainer:
         if not submission:
             _log_loss_ = log_loss(y_true=labels, y_pred=preds)
             _auc_ = roc_auc_score(y_true=labels, y_score=preds)
-            print('%s-Loss: %2.4f, AUC: %2.4f, Elapsed: %s' %
+            print('%s-Loss: %.6f, AUC: %.6f, Elapsed: %s' %
                   (gen.gen_type.capitalize(), _log_loss_, _auc_, str(timedelta(seconds=(time.time() - start_time)))))
             if writer:
                 summary = tf.Summary(value=[tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
