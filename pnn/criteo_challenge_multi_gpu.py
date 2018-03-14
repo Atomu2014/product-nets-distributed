@@ -196,7 +196,7 @@ class Trainer:
                 self.learning_rate = tf.get_variable(name='learning_rate', dtype=tf.float32, shape=[],
                                                     initializer=tf.constant_initializer(FLAGS.learning_rate),
                                                     trainable=False)
-                self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate, epsilon=FLAGS.epsilon)
+                self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate)
                 for i in xrange(num_gpus):
                     with tf.device('/gpu:%d' % i):
                         print('Deploying gpu:%d ...' % i)

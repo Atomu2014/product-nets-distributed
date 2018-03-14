@@ -557,7 +557,7 @@ class KFM(Model):
 
         self.def_placeholder(train_flag=False)
 
-        self.embedding_lookup(weight_flag=linear, bias_flag=linear)
+        self.embedding_lookup()
 
         self.def_kernel_product(unit_kernel=unit_kernel, fix_kernel=fix_kernel, kernel_type=kernel_type)
 
