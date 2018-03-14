@@ -354,7 +354,8 @@ class Trainer:
         else:
             fetches = []
             train_feed = {}
-            _split = range(0, len(batch_ys), int(len(batch_ys) / FLAGS.num_gpus))
+            _batch = int(len(batch_ys) / FLAGS.num_gpus)
+            _split = [_batch * i for i in range(1, FLAGS.num_gpus)]
             batch_xs = np.split(batch_xs, _split)
             batch_ys = np.split(batch_ys, _split)
             for i, model in enumerate(self.models):
@@ -383,9 +384,8 @@ class Trainer:
         else:
             fetches = []
             feed_dict = {}
-            if len(batch_ys) < FLAGS.num_gpus:
-                return [], []
-            _split = range(0, len(batch_ys), int(len(batch_ys) / FLAGS.num_gpus))
+            _batch = int(len(batch_ys) / FLAGS.num_gpus)
+            _split = [_batch * i for i in range(1, FLAGS.num_gpus)]
             batch_xs = np.split(batch_xs, _split)
             batch_ys = np.split(batch_ys, _split)
             for i, model in enumerate(self.models):
@@ -393,7 +393,6 @@ class Trainer:
                 fetches.append(model.preds)
                 feed_dict[model.inputs] = xs
                 feed_dict[model.labels] = ys
-                labels.append(ys.flatten())
                 if model.training is not None:
                     feed_dict[model.training] = False
             _preds_ = self.sess.run(fetches=fetches, feed_dict=feed_dict)
