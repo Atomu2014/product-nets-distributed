@@ -3,6 +3,7 @@ from __future__ import print_function
 
 import json
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = 3
 import sys
 import time
 from datetime import timedelta, datetime
@@ -275,7 +276,7 @@ class Trainer:
                                       num_fields=self.dataset.num_fields,
                                       **self.model_param)
                 tf.get_variable_scope().reuse_variables()
-                self.grads = self.opt.compute_gradients(model.loss)
+                self.grads = self.opt.compute_gradients(self.model.loss)
             
             if FLAGS.lazy_update > 1:
                 local_grads = []
@@ -411,7 +412,8 @@ class Trainer:
 
     def train_batch(self, batch_xs, batch_ys):
         if self.num_gpus == 1:
-            fetches = [self.train_op]
+            train_op = self.train_op if FLAGS.lazy_update <= 1 else self.accumulate_op
+            fetches = [train_op]
             train_feed = {}
             fetches += [self.model.loss, self.model.log_loss, self.model.l2_loss]
             train_feed[self.model.inputs] = batch_xs
