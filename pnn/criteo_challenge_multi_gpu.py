@@ -68,7 +68,7 @@ tf.app.flags.DEFINE_bool('unit_kernel', False, 'Kernel in unit ball')
 tf.app.flags.DEFINE_bool('fix_kernel', False, 'Fix kernel')
 
 tf.app.flags.DEFINE_integer('num_rounds', 4, 'Number of training rounds')
-tf.app.flags.DEFINE_integer('eval_level', 5, 'Evaluating frequency level')
+tf.app.flags.DEFINE_integer('eval_level', 0, 'Evaluating frequency level')
 tf.app.flags.DEFINE_float('decay', 1., 'Learning rate decay')
 tf.app.flags.DEFINE_integer('log_frequency', 1000, 'Logging frequency')
 
@@ -275,10 +275,29 @@ class Trainer:
                                       num_fields=self.dataset.num_fields,
                                       **self.model_param)
                 tf.get_variable_scope().reuse_variables()
-            # TODO lazy_update
-            # if not FLAGS.distributed or not FLAGS.sync:
-            self.train_op = self.opt.minimize(self.model.loss, global_step=self.global_step)
-            # TODO sync train_op
+                self.grads = self.opt.compute_gradients(model.loss)
+            
+            if FLAGS.lazy_update > 1:
+                local_grads = []
+                accumulate_op = []
+                reset_op = []
+                for grad, v in self.grads:
+                    zero_grad = tf.zeros_like(v)
+                    local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False)
+                    reset_grad = local_grad.assign(zero_grad)
+                    if FLAGS.sparse_grad and isinstance(grad, tf.IndexedSlices):
+                        accumulate_grad = local_grad.scatter_sub(-grad)
+                    else:
+                        accumulate_grad = local_grad.assign_add(grad)
+                    local_grads.append((local_grad, v))
+                    accumulate_op.append(accumulate_grad)
+                    reset_op.append(reset_grad)
+            if FLAGS.lazy_update > 1:
+                self.update_op = self.opt.apply_gradients(local_grads, global_step=self.global_step)
+                self.accumulate_op = tf.group(*accumulate_op)
+                self.reset_op = tf.group(*reset_op)
+            else:
+                self.train_op = self.opt.minimize(self.model.loss, global_step=self.global_step)
             self.saver = tf.train.Saver()
 
     def build_graph_multi_gpu(self):
@@ -307,9 +326,10 @@ class Trainer:
                             grads = self.opt.compute_gradients(model.loss)
                             self.tower_grads.append(grads)
 
+        with tf.device('job:worker/task:%d/gpu:0' % FLAGS.task_index):
             print('###################################')
             average_grads = []
-            if FLAGS.lazy_update > 0:
+            if FLAGS.lazy_update > 1:
                 local_grads = []
                 accumulate_op = []
                 reset_op = []
@@ -333,9 +353,8 @@ class Trainer:
 
                 if FLAGS.lazy_update > 1:
                     zero_grad = tf.zeros_like(v)
-                    # TODO: local variable
-                    with tf.device('/gpu:0'):
-                        local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False)
+                    # TODO add name
+                    local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False)
                     reset_grad = local_grad.assign(zero_grad)
                     if FLAGS.sparse_grad and isinstance(grad, tf.IndexedSlices):
                         accumulate_grad = local_grad.scatter_sub(-grad)
@@ -515,18 +534,19 @@ class Trainer:
                             print('Round: %d, Eval: %d / %d, AvgTime: %.2fms, Elapsed: %.2fs, ETA: %s' %
                                 (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / self.step),
                                 elapsed_time, self.get_timedelta(eta=eta)))
-                            if not FLAGS.distributed or FLAGS.task_index == 0:
+                            if not FLAGS.distributed:# or FLAGS.task_index == 0:
                                 self.evaluate(self.valid_gen, self.valid_writer)
                                 # TODO implement decay
                                 # self.learning_rate.assign(self.learning_rate * FLAGS.decay)
 
-                if not FLAGS.distributed or FLAGS.task_index == 0:
+                if not FLAGS.distributed:# or FLAGS.task_index == 0:
                     self.saver.save(self.get_nake_sess(), os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
                     # TODO check evaluate if lazy_update > num_steps
                     if FLAGS.eval_level == 0 or (FLAGS.lazy_update > 1):
                         self.evaluate(self.valid_gen, self.valid_writer)                    
                 print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
             if FLAGS.distributed:
+                self.evaluate(self.test_gen, self.test_writer)                                    
                 self.stop_worker()
 
     def stop_worker(self):
