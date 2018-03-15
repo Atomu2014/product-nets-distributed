@@ -303,7 +303,6 @@ class Trainer:
             self.begin_step = self.global_step.eval(self.sess)
             self.step = self.begin_step
             self.start_time = time.time()
-            self.grad_counter = 
             self.local_step = 0
 
             for r in range(1, FLAGS.num_rounds + 1):
@@ -324,10 +323,10 @@ class Trainer:
                             # elapsed_time = self.get_elapsed()
                             # print('Local step %d, Elapsed: %.2fs, Lazy update' % (self.local_step, elapsed_time))
 
-                            if self.local_step // FLAGS.lazy_update % FLAGS.log_frequency == 0:
-                                elapsed_time = self.get_elapsed()
-                                print('Done step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
-                                    % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
+                        if self.local_step % FLAGS.log_frequency == 0:
+                            elapsed_time = self.get_elapsed()
+                            print('Local step: %d, Global step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
+                                % (self.local_step, self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
 
                     else:
                         if self.step % FLAGS.log_frequency == 0:
