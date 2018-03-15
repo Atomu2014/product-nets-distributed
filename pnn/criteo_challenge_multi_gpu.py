@@ -544,12 +544,12 @@ class Trainer:
                                 # TODO implement decay
                                 # self.learning_rate.assign(self.learning_rate * FLAGS.decay)
 
+                print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
                 if not FLAGS.distributed:# or FLAGS.task_index == 0:
                     self.saver.save(self.get_nake_sess(), os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
                     # TODO check evaluate if lazy_update > num_steps
                     if FLAGS.eval_level == 0 or (FLAGS.lazy_update > 1):
                         self.evaluate(self.valid_gen, self.valid_writer)                    
-                print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
             if FLAGS.distributed:
                 self.evaluate(self.test_gen, self.test_writer)                                    
                 self.stop_worker()
