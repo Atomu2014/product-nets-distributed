@@ -20,7 +20,7 @@ from tf_models_share_vars import as_model
 
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('ps_hosts', '10.58.14.149:12345', 'Comma-separated list of hostname:port pairs')
-tf.app.flags.DEFINE_string('worker_hosts', '10.58.14.149:12346', #,10.58.14.150:12347',
+tf.app.flags.DEFINE_string('worker_hosts', '10.58.14.147:12346', #,10.58.14.150:12347',
                            'Comma-separated list of hostname:port pairs')
 tf.app.flags.DEFINE_string('worker_num_gpus', '4', 'Comma-separated list of integers')
 tf.app.flags.DEFINE_string('job_name', '', 'One of ps, worker')
@@ -239,7 +239,7 @@ class Trainer:
         self.worker_hosts = FLAGS.worker_hosts.split(',')
         self.cluster = tf.train.ClusterSpec({'ps': self.ps_hosts, 'worker': self.worker_hosts})
         self.server = tf.train.Server(self.cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index,
-                                        config=gpu_config)
+                                    config=self.gpu_config)
 
     def start_ps(self):
         print(self.server.target)
@@ -255,7 +255,7 @@ class Trainer:
         if not FLAGS.distributed:
             return '/gpu:%d' % gpu_index
         else:
-            return tf.train.replica_device_setter(worker_device='job:worker/task:%d/gpu:%d' % (FLAGS.task_index, i),
+            return tf.train.replica_device_setter(worker_device='job:worker/task:%d/gpu:%d' % (FLAGS.task_index, gpu_index),
                                                     cluster=self.cluster)
 
     def build_graph(self):
