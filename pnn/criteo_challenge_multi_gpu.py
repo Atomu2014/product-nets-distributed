@@ -19,6 +19,16 @@ from print_hook import PrintHook
 from tf_models_share_vars import as_model
 
 FLAGS = tf.app.flags.FLAGS
+tf.app.flags.DEFINE_string('ps_hosts', '10.58.14.149:12345', 'Comma-separated list of hostname:port pairs')
+tf.app.flags.DEFINE_string('worker_hosts', '10.58.14.149:12346', #,10.58.14.150:12347',
+                           'Comma-separated list of hostname:port pairs')
+tf.app.flags.DEFINE_string('worker_num_gpus', '4', 'Comma-separated list of integers')
+tf.app.flags.DEFINE_string('job_name', '', 'One of ps, worker')
+tf.app.flags.DEFINE_integer('task_index', 0, 'Index of task within the job')
+tf.app.flags.DEFINE_integer('num_ps', 1, 'Number of ps')
+tf.app.flags.DEFINE_integer('num_workers', 1, 'Number of workers')
+tf.app.flags.DEFINE_bool('distributed', True, 'Distributed training using parameter servers')
+# tf.app.flags.DEFINE_bool('sync', False, 'Synchronized training')
 tf.app.flags.DEFINE_integer('lazy_update', 1, 'Number of local steps by which variable update is delayed')
 
 tf.app.flags.DEFINE_integer('num_shards', 1, 'Number of variable partitions')
@@ -110,6 +120,24 @@ def sparse_grads_mean(grads_and_vars):
     return tf.IndexedSlices(values=values, indices=indices, dense_shape=dense_shape)
 
 
+def create_done_queue(i):
+    with tf.device('/job:ps/task:%d' % (i)):
+        return tf.FIFOQueue(FLAGS.num_workers, tf.int32, shared_name='done_queue' + str(i))
+
+
+def create_done_queues():
+    return [create_done_queue(i) for i in range(FLAGS.num_ps)]
+
+
+def create_finish_queue(i):
+    with tf.device('/job:worker/task:%d' % (i)):
+        return tf.FIFOQueue(FLAGS.num_workers - 1, tf.int32, shared_name='done_queue' + str(i))
+
+
+def create_finish_queues():
+    return [create_finish_queue(0)]
+
+
 class Trainer:
     def __init__(self):
         self.config = {}
@@ -119,25 +147,37 @@ class Trainer:
         self.worker_dir = ''
         self.sub_file = os.path.join(self.logdir, 'submission.%d.csv')
         redirect_stdout(self.logfile)
+
+        if not FLAGS.distributed:
+            self.num_gpus = FLAGS.num_gpus
+            self.total_num_gpus = num_gpus
+        else:
+            self.worker_num_gpus = [int(x) for x in FLAGS.worker_num_gpus.split(',')]            
+            self.num_gpus = self.worker_num_gpus[FLAGS.task_index]
+            self.total_num_gpus = sum(self.worker_num_gpus)
+
         self.train_data_param = {
             'gen_type': 'train',
             'random_sample': True,
             # TODO
-            'batch_size': FLAGS.batch_size * FLAGS.num_gpus,
+            'batch_size': FLAGS.batch_size * self.num_gpus,
             'squeeze_output': False,
             'val_ratio': FLAGS.val_ratio,
         }
+        if FLAGS.distributed and FLAGS.job_name == 'worker':
+            self.train_data_param['num_workers'] = FLAGS.num_workers
+            self.train_data_param['task_index'] = FLAGS.task_index
         self.valid_data_param = {
             'gen_type': 'valid' if FLAGS.val else 'test',
             'random_sample': False,
-            'batch_size': FLAGS.test_batch_size * FLAGS.num_gpus,
+            'batch_size': FLAGS.test_batch_size * self.num_gpus,
             'squeeze_output': False,
             'val_ratio': FLAGS.val_ratio,
         }
         self.test_data_param = {
             'gen_type': 'test',
             'random_sample': False,
-            'batch_size': FLAGS.test_batch_size * FLAGS.num_gpus,
+            'batch_size': FLAGS.test_batch_size * self.num_gpus,
             'squeeze_output': False,
         }
         self.train_logdir = os.path.join(self.logdir, 'train', self.worker_dir)
@@ -165,11 +205,64 @@ class Trainer:
             self.model_param['kernel_type'] = FLAGS.kernel_type
         self.dump_config()
 
+    def get_elapsed(self):
+        return time.time() - self.start_time
+
+    def get_timedelta(self, eta=None):
+        eta = eta or (time.time() - self.start_time)
+        return str(timedelta(seconds=eta))
+
+    def dump_config(self):
+        for k, v in getattr(FLAGS, '__flags').iteritems():
+            self.config[k] = getattr(FLAGS, k)
+        for k, v in __init__.config.iteritems():
+            if k != 'default':
+                self.config[k] = v
+        self.config['train_data_param'] = self.train_data_param
+        self.config['valid_data_param'] = self.valid_data_param
+        self.config['test_data_param'] = self.test_data_param
+        self.config['logdir'] = self.logdir
+        config_json = json.dumps(self.config, indent=4, sort_keys=True, separators=(',', ':'))
+        print('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
+        print(config_json)
+        path_json = os.path.join(self.logdir, 'config.json')
+        cnt = 1
+        while os.path.exists(path_json):
+            path_json = os.path.join(self.logdir, 'config%d.json' % cnt)
+            cnt += 1
+        print('Config json file:', path_json)
+        print('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
+        open(path_json, 'w').write(config_json)
+
+    def create_cluter(self):
+        self.ps_hosts = FLAGS.ps_hosts.split(',')
+        self.worker_hosts = FLAGS.worker_hosts.split(',')
+        self.cluster = tf.train.ClusterSpec({'ps': self.ps_hosts, 'worker': self.worker_hosts})
+        self.server = tf.train.Server(self.cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index,
+                                        config=gpu_config)
+
+    def start_ps(self):
+        print(self.server.target)
+        sess = tf.Session(self.server.target)
+        queue = create_done_queue(FLAGS.task_index)
+        print('PS %d: waiting %d workers to finish' % (FLAGS.task_index, FLAGS.num_workers))
+        for i in range(FLAGS.num_workers):
+            sess.run(queue.dequeue())
+            print('PS %d received done %d' % (FLAGS.task_index, i))
+        print('PS %d: quitting' % (FLAGS.task_index))
+
+    def device_op(self, gpu_index):
+        if not FLAGS.distributed:
+            return '/gpu:%d' % gpu_index
+        else:
+            return tf.train.replica_device_setter(worker_device='job:worker/task:%d/gpu:%d' % (FLAGS.task_index, i),
+                                                    cluster=self.cluster)
+
+    def build_graph(self):
         tf.reset_default_graph()
         self.dataset = as_dataset(FLAGS.dataset)
 
-    def build_graph(self):
-        with tf.device('/gpu:0'):
+        with tf.device(self.device_op(0)):
             with tf.variable_scope(tf.get_variable_scope()):
                 self.global_step = tf.get_variable(name='global_step', dtype=tf.int32, shape=[],
                                                    initializer=tf.constant_initializer(0), trainable=False)
@@ -183,15 +276,18 @@ class Trainer:
                                       **self.model_param)
                 tf.get_variable_scope().reuse_variables()
             # TODO lazy_update
+            # if not FLAGS.distributed or not FLAGS.sync:
             self.train_op = self.opt.minimize(self.model.loss, global_step=self.global_step)
+            # TODO sync train_op
             self.saver = tf.train.Saver()
 
     def build_graph_multi_gpu(self):
+        tf.reset_default_graph()
+        self.dataset = as_dataset(FLAGS.dataset)
         self.tower_grads = []
         self.models = []
 
-        with tf.device('/gpu:0'):
-            num_gpus = FLAGS.num_gpus
+        with tf.device(self.device_op(0)):
             with tf.variable_scope(tf.get_variable_scope()):
                 self.global_step = tf.get_variable(name='global_step', dtype=tf.int32, shape=[],
                                                     initializer=tf.constant_initializer(0), trainable=False)
@@ -199,8 +295,8 @@ class Trainer:
                                                     initializer=tf.constant_initializer(FLAGS.learning_rate),
                                                     trainable=False)
                 self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate)
-                for i in xrange(num_gpus):
-                    with tf.device('/gpu:%d' % i):
+                for i in xrange(self.num_gpus):
+                    with tf.device(self.device_op(i)):
                         print('Deploying gpu:%d ...' % i)
                         with tf.name_scope('tower_%d' % i):
                             model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
@@ -237,6 +333,7 @@ class Trainer:
 
                 if FLAGS.lazy_update > 1:
                     zero_grad = tf.zeros_like(v)
+                    # TODO: local variable
                     local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False)
                     reset_grad = local_grad.assign(zero_grad)
                     if FLAGS.sparse_grad and isinstance(grad, tf.IndexedSlices):
@@ -259,8 +356,67 @@ class Trainer:
                 self.train_op = self.opt.apply_gradients(average_grads, global_step=self.global_step)
             self.saver = tf.train.Saver()
 
+    def start_worker(self):
+        with tf.device(self.device_op(0)):
+            self.enq_ops = []
+            for q in create_done_queues():
+                qop = q.enqueue(1)
+                self.enq_ops.append(qop)
+            # if not FLAGS.sync:
+            if FLAGS.task_index != 0:
+                for q in create_finish_queues():
+                    qop = q.enqueue(1)
+                    self.enq_ops.insert(0, qop)
+            else:
+                chief_queue = create_finish_queue(FLAGS.task_index)
+                self.deq_op = []
+                for i in range(FLAGS.num_workers - 1):
+                    self.deq_op.append(chief_queue.dequeue())
+
     def sess_op(self):
-        return tf.Session(config=self.gpu_config)
+        if not FLAGS.distributed:
+            return tf.Session(config=self.gpu_config)
+        else:
+            return tf.train.MonitoredTrainingSession(master=self.server.target, 
+                                                    is_chief=(FLAGS.task_index == 0),
+                                                    # TODO
+                                                    hooks=None,
+                                                    chief_only_hooks=None)
+
+    def train_batch(self, batch_xs, batch_ys):
+        if self.num_gpus == 1:
+            fetches = [self.train_op, self.global_step]
+            train_feed = {}
+            fetches += [self.model.loss, self.model.log_loss, self.model.l2_loss]
+            train_feed[self.model.inputs] = batch_xs
+            train_feed[self.model.labels] = batch_ys
+            if self.model.training is not None:
+                train_feed[self.model.training] = True
+
+            _, step, _loss_, _log_loss_, _l2_loss_ = self.sess.run(fetches=fetches, feed_dict=train_feed)
+        else:
+            fetches = []
+            train_feed = {}
+            _batch = int(len(batch_ys) / self.num_gpus)
+            _split = [_batch * i for i in range(1, self.num_gpus)]
+            batch_xs = np.split(batch_xs, _split)
+            batch_ys = np.split(batch_ys, _split)
+            for i, model in enumerate(self.models):
+                _xs, _ys = batch_xs[i], batch_ys[i]
+                fetches += [model.loss, model.log_loss, model.l2_loss]
+                train_feed[model.inputs] = _xs
+                train_feed[model.labels] = _ys
+                if model.training is not None:
+                    train_feed[model.training] = True
+
+            train_op = self.train_op if FLAGS.lazy_update <= 1 else self.accumulate_op
+            ret = self.sess.run(fetches=[train_op, self.global_step] + fetches,
+                                feed_dict=train_feed, )
+            step = ret[1]
+            _loss_ = np.mean([ret[i] for i in range(2, len(ret), 3)])
+            _log_loss_ = np.mean([ret[i] for i in range(3, len(ret), 3)])
+            _l2_loss_ = np.mean([ret[i] for i in range(4, len(ret), 3)])
+        return step, _loss_, _log_loss_, _l2_loss_
 
     def train(self):
         with self.sess_op() as self.sess:
@@ -281,23 +437,31 @@ class Trainer:
                 self.train_size += len(_y)
                 self.num_steps += 1
             self.eval_steps = int(np.ceil(self.num_steps / FLAGS.eval_level)) if FLAGS.eval_level else 0
-
-            print('Train size = %d, Batch size = %d, GPUs = %d' %
-                  (self.train_size, FLAGS.batch_size, FLAGS.num_gpus))
+               
+            print('Train size = %d, Batch size = %d, GPUs = %d / %d' %
+                  (self.train_size, FLAGS.batch_size, self.num_gpus, self.total_num_gpus))
             print('%d rounds in total, One round = %d steps, One evaluation = %d steps' %
                   (FLAGS.num_rounds, self.num_steps, self.eval_steps))
 
-            if not FLAGS.restore:
-                self.sess.run(tf.global_variables_initializer())
+            if not FLAGS.distributed:
+                if not FLAGS.restore:
+                    self.sess.run(tf.global_variables_initializer())
+                else:
+                    # TODO check restore
+                    checkpoint_state = tf.train.get_checkpoint_state(self.ckpt_dir)
+                    if checkpoint_state and checkpoint_state.model_checkpoint_path:
+                        self.saver.restore(self.sess, checkpoint_state.model_checkpoint_path)
+                        print('Restore model from:', checkpoint_state.model_checkpoint_path)
+                        print('Run initial evaluation...')
+                        self.evaluate(self.test_gen, self.test_writer)
+                    else:
+                        print('Restore failed')
             else:
-                checkpoint_state = tf.train.get_checkpoint_state(self.ckpt_dir)
-                if checkpoint_state and checkpoint_state.model_checkpoint_path:
-                    self.saver.restore(self.sess, checkpoint_state.model_checkpoint_path)
-                    print('Restore model from:', checkpoint_state.model_checkpoint_path)
+                # TODO check restore                
+                if FLAGS.restore:
+                    print('Restore model from:', self.ckpt_dir)
                     print('Run initial evaluation...')
                     self.evaluate(self.test_gen, self.test_writer)
-                else:
-                    print('Restore failed')
 
             # TODO: initial evaluation
             self.begin_step = self.global_step.eval(self.sess)
@@ -309,7 +473,7 @@ class Trainer:
                 print('Round: %d' % r)
                 for batch_xs, batch_ys in self.train_gen:
                     # TODO: check
-                    if len(batch_ys) < FLAGS.num_gpus:
+                    if len(batch_ys) < self.num_gpus:
                         break
 
                     self.step, _loss_, _log_loss_, _l2_loss_ = self.train_batch(batch_xs, batch_ys)
@@ -324,10 +488,10 @@ class Trainer:
                             # print('Local step %d, Elapsed: %.2fs, Lazy update' % (self.local_step, elapsed_time))
 
                         if self.local_step % FLAGS.log_frequency == 0:
+                            self.step = self.global_step.eval()
                             elapsed_time = self.get_elapsed()
                             print('Local step: %d, Global step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
                                 % (self.local_step, self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
-
                     else:
                         if self.step % FLAGS.log_frequency == 0:
                             elapsed_time = self.get_elapsed()
@@ -345,80 +509,33 @@ class Trainer:
                             print('Round: %d, Eval: %d / %d, AvgTime: %.2fms, Elapsed: %.2fs, ETA: %s' %
                                 (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / self.step),
                                 elapsed_time, self.get_timedelta(eta=eta)))
-                            self.evaluate(self.valid_gen, self.valid_writer)
-                            self.learning_rate.assign(self.learning_rate * FLAGS.decay)
+                            if not FLAGS.distributed or FLAGS.task_index == 0:
+                                self.evaluate(self.valid_gen, self.valid_writer)
+                                self.learning_rate.assign(self.learning_rate * FLAGS.decay)
 
-                self.saver.save(self.sess, os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
+                if not FLAGS.distributed or FLAGS.task_index == 0:
+                    self.saver.save(self.sess, os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
+                    # TODO check evaluate if lazy_update > num_steps
+                    if FLAGS.eval_level == 0 or (FLAGS.lazy_update > 1):
+                        self.evaluate(self.valid_gen, self.valid_writer)                    
                 print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
-                if FLAGS.eval_level == 0 or (FLAGS.lazy_update > 1):
-                    self.evaluate(self.valid_gen, self.valid_writer)                    
+            if FLAGS.distributed:
+                self.stop_worker()
 
-    def get_elapsed(self):
-        return time.time() - self.start_time
-
-    def get_timedelta(self, eta=None):
-        eta = eta or (time.time() - self.start_time)
-        return str(timedelta(seconds=eta))
-
-    def dump_config(self):
-        for k, v in getattr(FLAGS, '__flags').iteritems():
-            self.config[k] = getattr(FLAGS, k)
-        for k, v in __init__.config.iteritems():
-            if k != 'default':
-                self.config[k] = v
-        self.config['train_data_param'] = self.train_data_param
-        self.config['valid_data_param'] = self.valid_data_param
-        self.config['test_data_param'] = self.test_data_param
-        self.config['logdir'] = self.logdir
-        config_json = json.dumps(self.config, indent=4, sort_keys=True, separators=(',', ':'))
-        print('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
-        print(config_json)
-        path_json = os.path.join(self.logdir, 'config.json')
-        cnt = 1
-        while os.path.exists(path_json):
-            path_json = os.path.join(self.logdir, 'config%d.json' % cnt)
-            cnt += 1
-        print('Config json file:', path_json)
-        print('$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$')
-        open(path_json, 'w').write(config_json)
-
-    def train_batch(self, batch_xs, batch_ys):
-        if FLAGS.num_gpus == 1:
-            fetches = [self.train_op, self.global_step]
-            train_feed = {}
-            fetches += [self.model.loss, self.model.log_loss, self.model.l2_loss]
-            train_feed[self.model.inputs] = batch_xs
-            train_feed[self.model.labels] = batch_ys
-            if self.model.training is not None:
-                train_feed[self.model.training] = True
-
-            _, step, _loss_, _log_loss_, _l2_loss_ = self.sess.run(fetches=fetches, feed_dict=train_feed)
-        else:
-            fetches = []
-            train_feed = {}
-            _batch = int(len(batch_ys) / FLAGS.num_gpus)
-            _split = [_batch * i for i in range(1, FLAGS.num_gpus)]
-            batch_xs = np.split(batch_xs, _split)
-            batch_ys = np.split(batch_ys, _split)
-            for i, model in enumerate(self.models):
-                _xs, _ys = batch_xs[i], batch_ys[i]
-                fetches += [model.loss, model.log_loss, model.l2_loss]
-                train_feed[model.inputs] = _xs
-                train_feed[model.labels] = _ys
-                if model.training is not None:
-                    train_feed[model.training] = True
-
-            train_op = self.train_op if FLAGS.lazy_update <= 1 else self.accumulate_op
-            ret = self.sess.run(fetches=[train_op, self.global_step] + fetches,
-                                feed_dict=train_feed, )
-            step = ret[1]
-            _loss_ = sum([ret[i] for i in range(2, len(ret), 3)]) / FLAGS.num_gpus
-            _log_loss_ = sum([ret[i] for i in range(3, len(ret), 3)]) / FLAGS.num_gpus
-            _l2_loss_ = sum([ret[i] for i in range(4, len(ret), 3)]) / FLAGS.num_gpus
-        return step, _loss_, _log_loss_, _l2_loss_
+    def stop_worker(self):
+        if FLAGS.task_index == 0:
+            print('Chief worker: waiting %d workers to finish' % len(self.deq_op))
+            for q in self.deq_op:
+                self.sess.run(q)
+                print('Chief worker received done')
+            print('Chief worker: quitting')
+        print('Total Time: %s, Logdir: %s' % (self.get_timedelta(), self.logdir))
+        for op in self.enq_ops:
+            self.sess.run(op)
+        print('Worker %d can not exit, should be killed' % FLAGS.task_index)
 
     def evaluate_batch(self, batch_xs, batch_ys):
-        if FLAGS.num_gpus == 1:
+        if self.num_gpus == 1:
             feed_dict = {self.model.inputs: batch_xs, self.model.labels: batch_ys}
             if self.model.training is not None:
                 feed_dict[self.model.training] = False
@@ -427,8 +544,8 @@ class Trainer:
         else:
             fetches = []
             feed_dict = {}
-            _batch = int(len(batch_ys) / FLAGS.num_gpus)
-            _split = [_batch * i for i in range(1, FLAGS.num_gpus)]
+            _batch = int(len(batch_ys) / self.num_gpus)
+            _split = [_batch * i for i in range(1, self.num_gpus)]
             batch_xs = np.split(batch_xs, _split)
             batch_ys = np.split(batch_ys, _split)
             for i, model in enumerate(self.models):
@@ -447,7 +564,7 @@ class Trainer:
         preds = []
         start_time = time.time()
         for batch_xs, batch_ys in gen:
-            if len(batch_ys) < FLAGS.num_gpus:
+            if len(batch_ys) < self.num_gpus:
                 break
             labels.append(batch_ys.flatten())
             preds.extend(self.evaluate_batch(batch_xs, batch_ys))
@@ -481,10 +598,17 @@ class Trainer:
 
 def main(_):
     trainer = Trainer()
-    if FLAGS.num_gpus == 1:
+    if FLAGS.distributed:
+        trainer.create_cluter()
+        if FLAGS.job_name == 'ps':
+            trainer.start_ps()
+            return
+    if trainer.num_gpus == 1:
         trainer.build_graph()
     else:
         trainer.build_graph_multi_gpu()
+    if FLAGS.distributed:
+        trainer.start_worker()
     trainer.train()
 
 
