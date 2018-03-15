@@ -238,8 +238,7 @@ class Trainer:
                     if self.model.training is not None:
                         train_feed[self.model.training] = True
 
-                    _, self.step, _loss_, _log_loss_, _l2_loss_ = self.sess.run(fetches=fetches,
-                                                                                feed_dict=train_feed)
+                    _, self.step, _loss_, _log_loss_, _l2_loss_ = self.sess.run(fetches=fetches, feed_dict=train_feed)
 
                     if self.step % FLAGS.log_frequency == 0:
                         elapsed_time = self.get_elapsed()

@@ -19,6 +19,8 @@ from print_hook import PrintHook
 from tf_models_share_vars import as_model
 
 FLAGS = tf.app.flags.FLAGS
+tf.app.flags.DEFINE_integer('lazy_update', 1, 'Number of local steps by which variable update is delayed')
+
 tf.app.flags.DEFINE_integer('num_shards', 1, 'Number of variable partitions')
 tf.app.flags.DEFINE_integer('num_gpus', 1, 'Number of variable partitions')
 tf.app.flags.DEFINE_bool('sparse_grad', False, 'Apply sparse gradient')
@@ -166,12 +168,6 @@ class Trainer:
         tf.reset_default_graph()
         self.dataset = as_dataset(FLAGS.dataset)
 
-    def build(self):
-        if FLAGS.num_gpus == 1:
-            self.build_graph()
-        else:
-            self.build_graph_multi_gpu()
-
     def build_graph(self):
         with tf.device('/gpu:0'):
             with tf.variable_scope(tf.get_variable_scope()):
@@ -186,7 +182,7 @@ class Trainer:
                                       num_fields=self.dataset.num_fields,
                                       **self.model_param)
                 tf.get_variable_scope().reuse_variables()
-
+            # TODO lazy_update
             self.train_op = self.opt.minimize(self.model.loss, global_step=self.global_step)
             self.saver = tf.train.Saver()
 
@@ -217,6 +213,10 @@ class Trainer:
 
             print('###################################')
             average_grads = []
+            if FLAGS.lazy_update > 0:
+                local_grads = []
+                accumulate_op = []
+                reset_op = []
             for grad_and_vars in zip(*self.tower_grads):
                 grads = []
                 # TODO test this
@@ -234,11 +234,28 @@ class Trainer:
                 grad_and_var = (grad, v)
                 print(type(grad), grad_shape, type(v), v.shape)
                 average_grads.append(grad_and_var)
+
+                if FLAGS.lazy_update > 1:
+                    zero_grad = tf.zeros_like(v)
+                    local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False)
+                    reset_grad = local_grad.assign(zero_grad)
+                    if isinstance(grad, tf.IndexedSlices):
+                        accumulate_grad = local_grad.scatter_sub(-grad)
+                    else:
+                        accumulate_grad = local_grad.assign_add(grad)
+                    local_grads.append((local_grad, v))
+                    accumulate_op.append(accumulate_grad)
+                    reset_op.append(reset_grad)
             print('###################################')
             # TODO test this
             # self.grad_op = tf.group([(x[0].op, x[1].op) for x in average_grads])
-            self.update_op = self.opt.apply_gradients(average_grads, global_step=self.global_step)
-            self.train_op = self.opt.apply_gradients(average_grads, global_step=self.global_step)
+            if FLAGS.lazy_update > 1:
+                self.update_op = self.opt.apply_gradients(local_grads, global_step=self.global_step)
+                # self.grad_op = tf.group(average_grads)
+                self.accumulate_op = tf.group(accumulate_op)
+                self.reset_op = tf.group(reset_op)
+            else:
+                self.train_op = self.opt.apply_gradients(average_grads, global_step=self.global_step)
             self.saver = tf.train.Saver()
 
     def sess_op(self):
@@ -281,9 +298,11 @@ class Trainer:
                 else:
                     print('Restore failed')
 
+            # TODO: initial evaluation
             self.begin_step = self.global_step.eval(self.sess)
             self.step = self.begin_step
             self.start_time = time.time()
+            self.local_step = 0
 
             for r in range(1, FLAGS.num_rounds + 1):
                 print('Round: %d' % r)
@@ -294,27 +313,42 @@ class Trainer:
 
                     self.step, _loss_, _log_loss_, _l2_loss_ = self.train_batch(batch_xs, batch_ys)
 
-                    if self.step % FLAGS.log_frequency == 0:
+                    self.local_step += 1
+                    if FLAGS.lazy_update > 1 and self.local_step % FLAGS.lazy_update == 0:
+                        self.sess.run(self.update_op)
+                        self.sess.run(self.reset_op)
                         elapsed_time = self.get_elapsed()
-                        print('Done step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
-                              % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
-                        summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=_loss_),
-                                                    tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
-                                                    tf.Summary.Value(tag='l2_loss', simple_value=_l2_loss_)])
-                        self.train_writer.add_summary(summary, global_step=self.step)
+                        print('Local step %d, Elapsed: %.2fs, Lazy update' % (self.local_step, elapsed_time))
 
-                    if FLAGS.eval_level and self.step % self.num_steps % self.eval_steps == 0:
-                        elapsed_time = self.get_elapsed()
-                        eta = FLAGS.num_rounds * self.num_steps / (self.step - self.begin_step) * elapsed_time
-                        eval_times = self.step % self.num_steps // self.eval_steps or FLAGS.eval_level
-                        print('Round: %d, Eval: %d / %d, AvgTime: %.2fms, Elapsed: %.2fs, ETA: %s' %
-                              (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / self.step),
-                               elapsed_time, self.get_timedelta(eta=eta)))
-                        self.evaluate(self.valid_gen, self.valid_writer)
-                        self.learning_rate.assign(self.learning_rate * FLAGS.decay)
+                    if FLAGS.lazy_update > 1:
+                        if self.local_step % FLAGS.log_frequency == 0:
+                            elapsed_time = self.get_elapsed()
+                            print('Done step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
+                                % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
+                    else:
+                        if self.step % FLAGS.log_frequency == 0:
+                            elapsed_time = self.get_elapsed()
+                            print('Done step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
+                                % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
+                            summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=_loss_),
+                                                        tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
+                                                        tf.Summary.Value(tag='l2_loss', simple_value=_l2_loss_)])
+                            self.train_writer.add_summary(summary, global_step=self.step)
+
+                        if FLAGS.eval_level and self.step % self.num_steps % self.eval_steps == 0:
+                            elapsed_time = self.get_elapsed()
+                            eta = FLAGS.num_rounds * self.num_steps / (self.step - self.begin_step) * elapsed_time
+                            eval_times = self.step % self.num_steps // self.eval_steps or FLAGS.eval_level
+                            print('Round: %d, Eval: %d / %d, AvgTime: %.2fms, Elapsed: %.2fs, ETA: %s' %
+                                (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / self.step),
+                                elapsed_time, self.get_timedelta(eta=eta)))
+                            self.evaluate(self.valid_gen, self.valid_writer)
+                            self.learning_rate.assign(self.learning_rate * FLAGS.decay)
 
                 self.saver.save(self.sess, os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
                 print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
+                if FLAGS.eval_level == 0:
+                    self.evaluate(self.valid_gen, self.valid_writer)                    
 
     def get_elapsed(self):
         return time.time() - self.start_time
@@ -371,7 +405,8 @@ class Trainer:
                 if model.training is not None:
                     train_feed[model.training] = True
 
-            ret = self.sess.run(fetches=[self.train_op, self.global_step] + fetches,
+            train_op = self.train_op if FLAGS.lazy_update <= 1 else self.accumulate_op
+            ret = self.sess.run(fetches=[train_op, self.global_step] + fetches,
                                 feed_dict=train_feed, )
             step = ret[1]
             _loss_ = sum([ret[i] for i in range(2, len(ret), 3)]) / FLAGS.num_gpus
@@ -443,7 +478,10 @@ class Trainer:
 
 def main(_):
     trainer = Trainer()
-    trainer.build()
+    if FLAGS.num_gpus == 1:
+        trainer.build_graph()
+    else:
+        trainer.build_graph_multi_gpu()
     trainer.train()
 
 
