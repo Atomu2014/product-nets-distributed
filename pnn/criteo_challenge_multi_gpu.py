@@ -239,7 +239,7 @@ class Trainer:
                     zero_grad = tf.zeros_like(v)
                     local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False)
                     reset_grad = local_grad.assign(zero_grad)
-                    if isinstance(grad, tf.IndexedSlices):
+                    if FLAGS.sparse_grad and isinstance(grad, tf.IndexedSlices):
                         accumulate_grad = local_grad.scatter_sub(-grad)
                     else:
                         accumulate_grad = local_grad.assign_add(grad)
@@ -252,8 +252,9 @@ class Trainer:
             if FLAGS.lazy_update > 1:
                 self.update_op = self.opt.apply_gradients(local_grads, global_step=self.global_step)
                 # self.grad_op = tf.group(average_grads)
-                self.accumulate_op = tf.group(accumulate_op)
-                self.reset_op = tf.group(reset_op)
+                # TODO tf.ver < 1.5 need *inputs 
+                self.accumulate_op = tf.group(*accumulate_op)
+                self.reset_op = tf.group(*reset_op)
             else:
                 self.train_op = self.opt.apply_gradients(average_grads, global_step=self.global_step)
             self.saver = tf.train.Saver()
@@ -302,6 +303,7 @@ class Trainer:
             self.begin_step = self.global_step.eval(self.sess)
             self.step = self.begin_step
             self.start_time = time.time()
+            self.grad_counter = 
             self.local_step = 0
 
             for r in range(1, FLAGS.num_rounds + 1):
@@ -314,17 +316,19 @@ class Trainer:
                     self.step, _loss_, _log_loss_, _l2_loss_ = self.train_batch(batch_xs, batch_ys)
 
                     self.local_step += 1
-                    if FLAGS.lazy_update > 1 and self.local_step % FLAGS.lazy_update == 0:
-                        self.sess.run(self.update_op)
-                        self.sess.run(self.reset_op)
-                        elapsed_time = self.get_elapsed()
-                        print('Local step %d, Elapsed: %.2fs, Lazy update' % (self.local_step, elapsed_time))
 
                     if FLAGS.lazy_update > 1:
-                        if self.local_step % FLAGS.log_frequency == 0:
-                            elapsed_time = self.get_elapsed()
-                            print('Done step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
-                                % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
+                        if self.local_step % FLAGS.lazy_update == 0:
+                            self.sess.run(self.update_op)
+                            self.sess.run(self.reset_op)
+                            # elapsed_time = self.get_elapsed()
+                            # print('Local step %d, Elapsed: %.2fs, Lazy update' % (self.local_step, elapsed_time))
+
+                            if self.local_step // FLAGS.lazy_update % FLAGS.log_frequency == 0:
+                                elapsed_time = self.get_elapsed()
+                                print('Done step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
+                                    % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
+
                     else:
                         if self.step % FLAGS.log_frequency == 0:
                             elapsed_time = self.get_elapsed()
@@ -347,7 +351,7 @@ class Trainer:
 
                 self.saver.save(self.sess, os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
                 print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
-                if FLAGS.eval_level == 0:
+                if FLAGS.eval_level == 0 or (FLAGS.lazy_update > 1):
                     self.evaluate(self.valid_gen, self.valid_writer)                    
 
     def get_elapsed(self):
