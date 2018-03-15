@@ -150,7 +150,7 @@ class Trainer:
 
         if not FLAGS.distributed:
             self.num_gpus = FLAGS.num_gpus
-            self.total_num_gpus = num_gpus
+            self.total_num_gpus = self.num_gpus
         else:
             self.worker_num_gpus = [int(x) for x in FLAGS.worker_num_gpus.split(',')]            
             self.num_gpus = self.worker_num_gpus[FLAGS.task_index]
@@ -334,7 +334,8 @@ class Trainer:
                 if FLAGS.lazy_update > 1:
                     zero_grad = tf.zeros_like(v)
                     # TODO: local variable
-                    local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False)
+                    with tf.device('/gpu:0'):
+                        local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False)
                     reset_grad = local_grad.assign(zero_grad)
                     if FLAGS.sparse_grad and isinstance(grad, tf.IndexedSlices):
                         accumulate_grad = local_grad.scatter_sub(-grad)
@@ -382,6 +383,12 @@ class Trainer:
                                                     # TODO
                                                     hooks=None,
                                                     chief_only_hooks=None)
+
+    def get_nake_sess(self):
+        sess = self.sess
+        while type(sess).__name__ != 'Session':
+            sess = sess._sess
+        return sess
 
     def train_batch(self, batch_xs, batch_ys):
         if self.num_gpus == 1:
@@ -476,7 +483,7 @@ class Trainer:
                         break
 
                     _loss_, _log_loss_, _l2_loss_ = self.train_batch(batch_xs, batch_ys)
-                    self.step = self.global_step.eval()
+                    self.step = self.sess.run(self.global_step)
                     self.local_step += 1
 
                     if FLAGS.lazy_update > 1:
@@ -487,7 +494,7 @@ class Trainer:
                             # print('Local step %d, Elapsed: %.2fs, Lazy update' % (self.local_step, elapsed_time))
 
                         if self.local_step % FLAGS.log_frequency == 0:
-                            self.step = self.global_step.eval()
+                            self.step = self.sess.run(self.global_step)
                             elapsed_time = self.get_elapsed()
                             print('Local step: %d, Global step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
                                 % (self.local_step, self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
@@ -510,10 +517,11 @@ class Trainer:
                                 elapsed_time, self.get_timedelta(eta=eta)))
                             if not FLAGS.distributed or FLAGS.task_index == 0:
                                 self.evaluate(self.valid_gen, self.valid_writer)
-                                self.learning_rate.assign(self.learning_rate * FLAGS.decay)
+                                # TODO implement decay
+                                # self.learning_rate.assign(self.learning_rate * FLAGS.decay)
 
                 if not FLAGS.distributed or FLAGS.task_index == 0:
-                    self.saver.save(self.sess, os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
+                    self.saver.save(self.get_nake_sess(), os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
                     # TODO check evaluate if lazy_update > num_steps
                     if FLAGS.eval_level == 0 or (FLAGS.lazy_update > 1):
                         self.evaluate(self.valid_gen, self.valid_writer)                    
