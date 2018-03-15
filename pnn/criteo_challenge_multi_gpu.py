@@ -3,7 +3,7 @@ from __future__ import print_function
 
 import json
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = 3
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import sys
 import time
 from datetime import timedelta, datetime
@@ -68,7 +68,7 @@ tf.app.flags.DEFINE_string('kernel_type', 'vec', 'Kernel type = mat, vec, num')
 tf.app.flags.DEFINE_bool('unit_kernel', False, 'Kernel in unit ball')
 tf.app.flags.DEFINE_bool('fix_kernel', False, 'Fix kernel')
 
-tf.app.flags.DEFINE_integer('num_rounds', 4, 'Number of training rounds')
+tf.app.flags.DEFINE_integer('num_rounds', 1, 'Number of training rounds')
 tf.app.flags.DEFINE_integer('eval_level', 0, 'Evaluating frequency level')
 tf.app.flags.DEFINE_float('decay', 1., 'Learning rate decay')
 tf.app.flags.DEFINE_integer('log_frequency', 1000, 'Logging frequency')
@@ -252,12 +252,15 @@ class Trainer:
             print('PS %d received done %d' % (FLAGS.task_index, i))
         print('PS %d: quitting' % (FLAGS.task_index))
 
-    def device_op(self, gpu_index):
+    def device_op(self, gpu_index, local=False):
         if not FLAGS.distributed:
             return '/gpu:%d' % gpu_index
         else:
-            return tf.train.replica_device_setter(worker_device='job:worker/task:%d/gpu:%d' % (FLAGS.task_index, gpu_index),
-                                                    cluster=self.cluster)
+            worker_device = '/job:worker/task:%d/gpu:%d' % (FLAGS.task_index, gpu_index)
+            if local:
+                return worker_device
+            else:
+                return tf.train.replica_device_setter(worker_device=worker_device, cluster=self.cluster)
 
     def build_graph(self):
         tf.reset_default_graph()
@@ -327,7 +330,7 @@ class Trainer:
                             grads = self.opt.compute_gradients(model.loss)
                             self.tower_grads.append(grads)
 
-        with tf.device('job:worker/task:%d/gpu:0' % FLAGS.task_index):
+        with tf.device(self.device_op(0, local=True)):
             print('###################################')
             average_grads = []
             if FLAGS.lazy_update > 1:
