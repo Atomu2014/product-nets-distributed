@@ -385,7 +385,7 @@ class Trainer:
 
     def train_batch(self, batch_xs, batch_ys):
         if self.num_gpus == 1:
-            fetches = [self.train_op, self.global_step]
+            fetches = [self.train_op]
             train_feed = {}
             fetches += [self.model.loss, self.model.log_loss, self.model.l2_loss]
             train_feed[self.model.inputs] = batch_xs
@@ -393,7 +393,7 @@ class Trainer:
             if self.model.training is not None:
                 train_feed[self.model.training] = True
 
-            _, step, _loss_, _log_loss_, _l2_loss_ = self.sess.run(fetches=fetches, feed_dict=train_feed)
+            _, _loss_, _log_loss_, _l2_loss_ = self.sess.run(fetches=fetches, feed_dict=train_feed)
         else:
             fetches = []
             train_feed = {}
@@ -410,13 +410,12 @@ class Trainer:
                     train_feed[model.training] = True
 
             train_op = self.train_op if FLAGS.lazy_update <= 1 else self.accumulate_op
-            ret = self.sess.run(fetches=[train_op, self.global_step] + fetches,
+            ret = self.sess.run(fetches=[train_op] + fetches,
                                 feed_dict=train_feed, )
-            step = ret[1]
-            _loss_ = np.mean([ret[i] for i in range(2, len(ret), 3)])
-            _log_loss_ = np.mean([ret[i] for i in range(3, len(ret), 3)])
-            _l2_loss_ = np.mean([ret[i] for i in range(4, len(ret), 3)])
-        return step, _loss_, _log_loss_, _l2_loss_
+            _loss_ = np.mean([ret[i] for i in range(1, len(ret), 3)])
+            _log_loss_ = np.mean([ret[i] for i in range(2, len(ret), 3)])
+            _l2_loss_ = np.mean([ret[i] for i in range(3, len(ret), 3)])
+        return _loss_, _log_loss_, _l2_loss_
 
     def train(self):
         with self.sess_op() as self.sess:
@@ -476,8 +475,8 @@ class Trainer:
                     if len(batch_ys) < self.num_gpus:
                         break
 
-                    self.step, _loss_, _log_loss_, _l2_loss_ = self.train_batch(batch_xs, batch_ys)
-
+                    _loss_, _log_loss_, _l2_loss_ = self.train_batch(batch_xs, batch_ys)
+                    self.step = self.global_step.eval()
                     self.local_step += 1
 
                     if FLAGS.lazy_update > 1:
