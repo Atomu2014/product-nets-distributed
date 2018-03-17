@@ -75,6 +75,7 @@ tf.app.flags.DEFINE_integer('log_frequency', 1000, 'Logging frequency')
 
 
 def get_logdir(FLAGS):
+    # TODO logdir
     if FLAGS.restore:
         logdir = FLAGS.logdir
     else:
@@ -145,7 +146,7 @@ class Trainer:
         self.logdir, self.logfile = get_logdir(FLAGS=FLAGS)
         self.ckpt_dir = os.path.join(self.logdir, 'checkpoints')
         self.ckpt_name = 'model.ckpt'
-        self.worker_dir = ''
+        self.worker_dir = 'worker_%d' % FLAGS.task_index if FLAGS.distributed else ''
         self.sub_file = os.path.join(self.logdir, 'submission.%d.csv')
         redirect_stdout(self.logfile)
 
@@ -280,15 +281,19 @@ class Trainer:
                                       **self.model_param)
                 tf.get_variable_scope().reuse_variables()
                 self.grads = self.opt.compute_gradients(self.model.loss)
-            
+        
+        with tf.device(self.device_op(0, local=True)):    
             if FLAGS.lazy_update > 1:
                 local_grads = []
                 accumulate_op = []
                 reset_op = []
+                self.local_grads = []
                 for grad, v in self.grads:
                     zero_grad = tf.zeros_like(v)
                     local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False,
+                                            name=v.name.split(':')[0] + '_local_grad',
                                             collections=[tf.GraphKeys.LOCAL_VARIABLES])
+                    self.local_grads.append(local_grad)
                     reset_grad = local_grad.assign(zero_grad)
                     if FLAGS.sparse_grad and isinstance(grad, tf.IndexedSlices):
                         accumulate_grad = local_grad.scatter_sub(-grad)
@@ -358,9 +363,10 @@ class Trainer:
 
                 if FLAGS.lazy_update > 1:
                     zero_grad = tf.zeros_like(v)
-                    # TODO add name
                     local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False, 
+                                            name=v.name.split(':')[0] + '_local_grad',
                                             collections=[tf.GraphKeys.LOCAL_VARIABLES])
+                    self.local_grads.append(local_grad)                    
                     reset_grad = local_grad.assign(zero_grad)
                     if FLAGS.sparse_grad and isinstance(grad, tf.IndexedSlices):
                         accumulate_grad = local_grad.scatter_sub(-grad)
@@ -451,7 +457,13 @@ class Trainer:
         return _loss_, _log_loss_, _l2_loss_
 
     def train(self):
-        with self.sess_op() as self.sess:
+        # with self.sess_op() as self.sess:
+        with tf.Session(self.server.target) as self.sess:
+            if not FLAGS.distributed or FLAGS.task_index == 0:
+                self.sess.run([tf.global_variables_initializer(),
+                                tf.local_variables_initializer()])
+            elif FLAGS.lazy_update > 1:
+                self.sess.run(tf.variables_initializer(self.local_grads))
             self.train_gen = self.dataset.batch_generator(self.train_data_param)
             self.valid_gen = self.dataset.batch_generator(self.valid_data_param)
             self.test_gen = self.dataset.batch_generator(self.test_data_param)
@@ -552,7 +564,7 @@ class Trainer:
                     # TODO check evaluate if lazy_update > num_steps
                     if FLAGS.eval_level == 0 or (FLAGS.lazy_update > 1):
                         self.evaluate(self.valid_gen, self.valid_writer)                    
-            if FLAGS.distributed:
+            if FLAGS.distributed and FLAGS.task_index == 0:
                 self.evaluate(self.test_gen, self.test_writer)                                    
                 self.stop_worker()
 
