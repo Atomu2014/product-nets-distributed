@@ -565,8 +565,9 @@ class Trainer:
                     # TODO check evaluate if lazy_update > num_steps
                     if FLAGS.eval_level == 0 or (FLAGS.lazy_update > 1):
                         self.evaluate(self.valid_gen, self.valid_writer)                    
-            if FLAGS.distributed and FLAGS.task_index == 0:
-                self.evaluate(self.test_gen, self.test_writer)                                    
+            if FLAGS.distributed:
+                if FLAGS.task_index == 0:
+                    self.evaluate(self.test_gen, self.test_writer)                                    
                 self.stop_worker()
 
     def stop_worker(self):
