@@ -287,7 +287,8 @@ class Trainer:
                 reset_op = []
                 for grad, v in self.grads:
                     zero_grad = tf.zeros_like(v)
-                    local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False)
+                    local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False,
+                                            collections=[tf.GraphKeys.LOCAL_VARIABLES])
                     reset_grad = local_grad.assign(zero_grad)
                     if FLAGS.sparse_grad and isinstance(grad, tf.IndexedSlices):
                         accumulate_grad = local_grad.scatter_sub(-grad)
@@ -358,7 +359,8 @@ class Trainer:
                 if FLAGS.lazy_update > 1:
                     zero_grad = tf.zeros_like(v)
                     # TODO add name
-                    local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False)
+                    local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False, 
+                                            collections=[tf.GraphKeys.LOCAL_VARIABLES])
                     reset_grad = local_grad.assign(zero_grad)
                     if FLAGS.sparse_grad and isinstance(grad, tf.IndexedSlices):
                         accumulate_grad = local_grad.scatter_sub(-grad)
