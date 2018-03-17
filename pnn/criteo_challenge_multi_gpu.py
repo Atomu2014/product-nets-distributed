@@ -343,6 +343,7 @@ class Trainer:
                 local_grads = []
                 accumulate_op = []
                 reset_op = []
+                self.local_grads = []
             for grad_and_vars in zip(*self.tower_grads):
                 grads = []
                 # TODO test this
