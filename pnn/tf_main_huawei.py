@@ -37,7 +37,7 @@ tf.app.flags.DEFINE_integer('num_gpus', 1, 'Number of variable partitions')
 tf.app.flags.DEFINE_bool('sparse_grad', False, 'Apply sparse gradient')
 
 tf.app.flags.DEFINE_string('logdir', '../log', 'Directory for storing mnist data')
-tf.app.flags.DEFINE_string('prefix', '', 'Prefix for logdir')
+tf.app.flags.DEFINE_string('tag', '', 'Tag for logdir')
 tf.app.flags.DEFINE_bool('restore', False, 'Restore from logdir')
 tf.app.flags.DEFINE_bool('val', False, 'If True, use validation set, else use test set')
 tf.app.flags.DEFINE_float('val_ratio', 0., 'Validation ratio')
@@ -79,8 +79,8 @@ def get_logdir(FLAGS):
     if FLAGS.restore:
         logdir = FLAGS.logdir
     else:
-        logdir = '%s/%s/%s/%s' % (
-            FLAGS.logdir, FLAGS.dataset, FLAGS.model, FLAGS.prefix + datetime.utcnow().strftime('%Y-%m-%d-%H-%M-%S'))
+        tag = datetime.utcnow().strftime('%Y-%m-%d-%H-%M-%S') if not FLAGS.distributed else ''
+        logdir = '%s/%s/%s/%s' % (FLAGS.logdir, FLAGS.dataset, FLAGS.model, FLAGS.tag + tag)
     if not os.path.exists(logdir):
         os.makedirs(logdir)
     logfile = open(logdir + '/log', 'a')
@@ -331,8 +331,8 @@ class Trainer:
                         print('Deploying gpu:%d ...' % i)
                         with tf.name_scope('tower_%d' % i):
                             model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
-                                             num_fields=self.dataset.num_fields, input_size=dataset.max_length * 2, 
-                                            field_types=['cat']*7 + ['set'], separator=separator=[1]*7 + [10],
+                                             num_fields=self.dataset.num_fields, input_size=self.dataset.max_length * 2, 
+                                            field_types=['cat']*7 + ['set'], separator=[1]*7 + [10],
                                              **self.model_param)
                             self.models.append(model)
                             tf.get_variable_scope().reuse_variables()
