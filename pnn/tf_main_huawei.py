@@ -21,16 +21,16 @@ from tf_models_multi_hot import as_model
 
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('ps_hosts', '10.58.14.149:12345', 'Comma-separated list of hostname:port pairs')
-tf.app.flags.DEFINE_string('worker_hosts', '10.58.14.147:12346', #,10.58.14.150:12347',
+tf.app.flags.DEFINE_string('worker_hosts', '10.58.14.147:12346,10.58.14.150:12347',
                            'Comma-separated list of hostname:port pairs')
-tf.app.flags.DEFINE_string('worker_num_gpus', '4', 'Comma-separated list of integers')
+tf.app.flags.DEFINE_string('worker_num_gpus', '4,4', 'Comma-separated list of integers')
 tf.app.flags.DEFINE_string('job_name', '', 'One of ps, worker')
 tf.app.flags.DEFINE_integer('task_index', 0, 'Index of task within the job')
 tf.app.flags.DEFINE_integer('num_ps', 1, 'Number of ps')
-tf.app.flags.DEFINE_integer('num_workers', 1, 'Number of workers')
+tf.app.flags.DEFINE_integer('num_workers', 2, 'Number of workers')
 tf.app.flags.DEFINE_bool('distributed', True, 'Distributed training using parameter servers')
 # tf.app.flags.DEFINE_bool('sync', False, 'Synchronized training')
-tf.app.flags.DEFINE_integer('lazy_update', 1, 'Number of local steps by which variable update is delayed')
+tf.app.flags.DEFINE_integer('lazy_update', 1000, 'Number of local steps by which variable update is delayed')
 
 tf.app.flags.DEFINE_integer('num_shards', 1, 'Number of variable partitions')
 tf.app.flags.DEFINE_integer('num_gpus', 1, 'Number of variable partitions')
@@ -48,7 +48,7 @@ tf.app.flags.DEFINE_float('init_val', 0.1, 'Initial accumulator value for adagra
 tf.app.flags.DEFINE_float('learning_rate', 0.1, 'Learning rate')
 tf.app.flags.DEFINE_string('loss_mode', 'mean', 'Loss = mean, sum')
 
-tf.app.flags.DEFINE_integer('batch_size', 1024, 'Training batch size')
+tf.app.flags.DEFINE_integer('batch_size', 1000, 'Training batch size')
 tf.app.flags.DEFINE_integer('test_batch_size', 10240, 'Testing batch size')
 tf.app.flags.DEFINE_string('dataset', 'huawei', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
 tf.app.flags.DEFINE_string('model', 'lr', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
@@ -278,8 +278,8 @@ class Trainer:
                 self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate)
                 # TODO: move thes properties to dataset
                 self.model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
-                                      num_fields=self.dataset.num_fields, input_size=dataset.max_length, 
-                                      field_types=['cat']*7 + ['set'], separator=range(1, 8),
+                                      num_fields=self.dataset.num_fields, input_size=self.dataset.max_length * 2, 
+                                      field_types=['cat']*7 + ['set'], separator=[1]*7 + [10],
                                       **self.model_param)
                 tf.get_variable_scope().reuse_variables()
                 self.grads = self.opt.compute_gradients(self.model.loss)
@@ -331,8 +331,8 @@ class Trainer:
                         print('Deploying gpu:%d ...' % i)
                         with tf.name_scope('tower_%d' % i):
                             model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
-                                             num_fields=self.dataset.num_fields, input_size=dataset.max_length, 
-                                            field_types=['cat']*7 + ['set'], separator=range(1, 8),
+                                             num_fields=self.dataset.num_fields, input_size=dataset.max_length * 2, 
+                                            field_types=['cat']*7 + ['set'], separator=separator=[1]*7 + [10],
                                              **self.model_param)
                             self.models.append(model)
                             tf.get_variable_scope().reuse_variables()

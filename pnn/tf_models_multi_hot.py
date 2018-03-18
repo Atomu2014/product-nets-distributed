@@ -205,15 +205,17 @@ class Model:
     def def_placeholder(self, train_flag=False):
         with tf.variable_scope('input'):
             self.inputs = tf.placeholder(dtype=tf.float32, shape=[None, self.input_size], name='inputs')
-            self.indices, self.values = tf.split(self.inputs, 2)
+            self.indices, self.values = tf.split(self.inputs, 2, axis=1)
             self.indices = tf.to_int32(self.indices)
-            self.values = tf.split(self.values, self.separator)
+            self.values = tf.expand_dims(self.values, axis=2)
+            self.values = tf.split(self.values, self.separator, axis=1)
             if self.input_norm:
                 # TODO concat cat fields together
                 for i in range(self.num_fields):
                     if self.field_types[i] == 'set':
-                        field_cnt = tf.reduce_sum(tf.where(tf.greater(self.values[i], 0), 1, 0), axis=1, keep_dims=True)
-                        self.values[i] *= tf.sqrt(1. / self.num_fields / tf.max(field_cnt, 1))
+                        field_cnt = tf.reduce_sum(tf.where(tf.greater(self.values[i], 0), 
+                                    tf.ones_like(self.values[i]), tf.zeros_like(self.values[i])), axis=1, keep_dims=True)
+                        self.values[i] *= tf.sqrt(1. / self.num_fields / tf.maximum(field_cnt, 1))
                     else:
                         self.values[i] *= np.sqrt(1. / self.num_fields)
             self.labels = tf.placeholder(dtype=tf.float32, shape=[None, self.output_dim], name='labels')
@@ -223,7 +225,7 @@ class Model:
     def apply_mask(self, inputs, mask, reduce_sum=None, expand=False):
         # for i, flag in enumerate(reduce_sum or [x == 'set' for x in self.field_types]):
         for i in range(len(inputs)):
-            inputs[i] *= mask[i] if not expand else tf.expand_dims(mask[i], 2)
+            inputs[i] *= mask[i]# if not expand else tf.expand_dims(mask[i], 2)
             inputs[i] = tf.reduce_sum(inputs[i], axis=1, keep_dims=True)
         return tf.concat(inputs, axis=1)
 
@@ -245,8 +247,8 @@ class Model:
                 w = tf.get_variable(name='w', shape=[self.input_dim, 1], dtype=dtype, initializer=initializer,
                                     collections=WEIGHTS)
                 # TODO try pass a list to embedding_lookup
-                self.xw = tf.nn.embedding_lookup(w, self.inputs)  # , partition_strategy='div')
-                self.xw = tf.split(self.xw, self.separator)
+                self.xw = tf.nn.embedding_lookup(w, self.indices)  # , partition_strategy='div')
+                self.xw = tf.split(self.xw, self.separator, axis=1)
                 self.xw = self.apply_mask(self.xw, self.values)
                 tf.add_to_collection('EMBEDS', self.xw)
             if vector_flag:
@@ -267,8 +269,8 @@ class Model:
                     v = tf.get_variable(name='v', shape=[self.input_dim, (self.num_fields - 1) * self.embed_size],
                                         dtype=dtype, initializer=initializer, collections=WEIGHTS)
                     v = tf.reshape(v, [self.input_dim, self.num_fields - 1, self.embed_size])
-                self.xv = tf.nn.embedding_lookup(v, self.inputs)  # , partition_strategy='div')
-                self.xv = tf.split(self.xv, self.separator)
+                self.xv = tf.nn.embedding_lookup(v, self.indices)  # , partition_strategy='div')
+                self.xv = tf.split(self.xv, self.separator, axis=1)
                 self.xv = self.apply_mask(self.xv, self.values, expand=True)
                 tf.add_to_collection('EMBEDS', self.xv)
             if bias_flag:
