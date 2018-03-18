@@ -17,7 +17,7 @@ import __init__
 sys.path.append(__init__.config['data_path'])
 from datasets import as_dataset
 from print_hook import PrintHook
-from tf_models import as_model
+from tf_models_multi_hot import as_model
 
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('ps_hosts', '10.58.14.149:12345', 'Comma-separated list of hostname:port pairs')
@@ -50,7 +50,7 @@ tf.app.flags.DEFINE_string('loss_mode', 'mean', 'Loss = mean, sum')
 
 tf.app.flags.DEFINE_integer('batch_size', 1024, 'Training batch size')
 tf.app.flags.DEFINE_integer('test_batch_size', 10240, 'Testing batch size')
-tf.app.flags.DEFINE_string('dataset', 'avazu', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
+tf.app.flags.DEFINE_string('dataset', 'huawei', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
 tf.app.flags.DEFINE_string('model', 'lr', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
 
 tf.app.flags.DEFINE_bool('input_norm', True, 'Input normalization')
@@ -276,8 +276,10 @@ class Trainer:
                                                          FLAGS.learning_rate),
                                                      trainable=False)
                 self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate)
+                # TODO: move thes properties to dataset
                 self.model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
-                                      num_fields=self.dataset.num_fields,
+                                      num_fields=self.dataset.num_fields, input_size=dataset.max_length, 
+                                      field_types=['cat']*7 + ['set'], separator=range(1, 8),
                                       **self.model_param)
                 tf.get_variable_scope().reuse_variables()
                 self.grads = self.opt.compute_gradients(self.model.loss)
@@ -329,7 +331,8 @@ class Trainer:
                         print('Deploying gpu:%d ...' % i)
                         with tf.name_scope('tower_%d' % i):
                             model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
-                                             num_fields=self.dataset.num_fields,
+                                             num_fields=self.dataset.num_fields, input_size=dataset.max_length, 
+                                            field_types=['cat']*7 + ['set'], separator=range(1, 8),
                                              **self.model_param)
                             self.models.append(model)
                             tf.get_variable_scope().reuse_variables()

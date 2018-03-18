@@ -16,7 +16,7 @@ import __init__
 sys.path.append(__init__.config['data_path'])
 from datasets import as_dataset
 from print_hook import PrintHook
-from tf_models_share_vars import as_model
+from tf_models import as_model
 
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_integer('num_shards', 1, 'Number of variable partitions')
