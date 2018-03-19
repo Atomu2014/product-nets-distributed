@@ -246,7 +246,6 @@ class Model:
                     initializer = get_initializer(init_type='uniform', minval=0, maxval=1)
                 w = tf.get_variable(name='w', shape=[self.input_dim, 1], dtype=dtype, initializer=initializer,
                                     collections=WEIGHTS)
-                # TODO try pass a list to embedding_lookup
                 self.xw = tf.nn.embedding_lookup(w, self.indices)  # , partition_strategy='div')
                 self.xw = tf.split(self.xw, self.separator, axis=1)
                 self.xw = self.apply_mask(self.xw, self.values)
@@ -833,9 +832,7 @@ class PIN(Model):
             self.wide = tf.reduce_sum(self.xw, axis=1) + self.b + 0.5 * self.p
 
         xv_p, xv_q = unroll_pairwise(self.xv, num_fields=self.num_fields)
-        # TODO check this
         if prod:
-            # batch * pair * 3k
             self.sub_nn_input = tf.concat([xv_p, xv_q, xv_p * xv_q], axis=2)
         else:
             self.sub_nn_input = tf.concat([xv_p, xv_q], axis=2)

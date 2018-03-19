@@ -784,7 +784,7 @@ class PIN(Model):
             self.wide = tf.reduce_sum(self.xw, axis=1) + self.b + 0.5 * self.p
 
         xv_p, xv_q = unroll_pairwise(self.xv, num_fields=self.num_fields)
-        # TODO check this
+
         if prod:
             # batch * pair * 3k
             self.sub_nn_input = tf.concat([xv_p, xv_q, xv_p * xv_q], axis=2)

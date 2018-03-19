@@ -75,7 +75,6 @@ tf.app.flags.DEFINE_integer('log_frequency', 1000, 'Logging frequency')
 
 
 def get_logdir(FLAGS):
-    # TODO logdir
     if FLAGS.restore:
         logdir = FLAGS.logdir
     else:
@@ -161,7 +160,6 @@ class Trainer:
         self.train_data_param = {
             'gen_type': 'train',
             'random_sample': True,
-            # TODO
             'batch_size': FLAGS.batch_size * self.num_gpus,
             'squeeze_output': False,
             'val_ratio': FLAGS.val_ratio,
@@ -276,7 +274,6 @@ class Trainer:
                                                          FLAGS.learning_rate),
                                                      trainable=False)
                 self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate)
-                # TODO: move thes properties to dataset
                 self.model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
                                       num_fields=self.dataset.num_fields, input_size=self.dataset.max_length * 2, 
                                       field_types=self.dataset.field_types, separator=self.dataset.field_lengths,
@@ -349,7 +346,6 @@ class Trainer:
                 self.local_grads = []
             for grad_and_vars in zip(*self.tower_grads):
                 grads = []
-                # TODO test this
                 if FLAGS.sparse_grad and isinstance(grad_and_vars[0][0], tf.IndexedSlices):
                     grad = sparse_grads_mean(grad_and_vars)
                     grad_shape = grad.dense_shape
@@ -385,7 +381,7 @@ class Trainer:
             if FLAGS.lazy_update > 1:
                 self.update_op = self.opt.apply_gradients(local_grads, global_step=self.global_step)
                 # self.grad_op = tf.group(average_grads)
-                # TODO tf.ver < 1.5 need *inputs 
+                # tf.ver < 1.5 need *inputs 
                 self.accumulate_op = tf.group(*accumulate_op)
                 self.reset_op = tf.group(*reset_op)
             else:
@@ -414,11 +410,6 @@ class Trainer:
             return tf.Session(config=self.gpu_config)
         else:
             return tf.Session(self.server.target)
-            # return tf.train.MonitoredTrainingSession(master=self.server.target, 
-            #                                         is_chief=(FLAGS.task_index == 0),
-            #                                         # TODO
-            #                                         hooks=None,
-            #                                         chief_only_hooks=None)
 
     def get_nake_sess(self):
         sess = self.sess
@@ -504,6 +495,7 @@ class Trainer:
             else:
                 # TODO check restore                
                 if FLAGS.restore:
+                    # TODO implement                    
                     print('Restore model from:', self.ckpt_dir)
                     print('Run initial evaluation...')
                     self.evaluate(self.test_gen, self.test_writer)
@@ -523,7 +515,6 @@ class Trainer:
             for r in range(1, FLAGS.num_rounds + 1):
                 print('Round: %d' % r)
                 for batch_xs, batch_ys in self.train_gen:
-                    # TODO: check
                     if len(batch_ys) < self.num_gpus:
                         break
 
