@@ -279,7 +279,7 @@ class Trainer:
                 # TODO: move thes properties to dataset
                 self.model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
                                       num_fields=self.dataset.num_fields, input_size=self.dataset.max_length * 2, 
-                                      field_types=['cat']*7 + ['set'], separator=[1]*7 + [10],
+                                      field_types=self.dataset.field_types, separator=self.dataset.field_lengths,
                                       **self.model_param)
                 tf.get_variable_scope().reuse_variables()
                 self.grads = self.opt.compute_gradients(self.model.loss)
@@ -332,7 +332,7 @@ class Trainer:
                         with tf.name_scope('tower_%d' % i):
                             model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
                                              num_fields=self.dataset.num_fields, input_size=self.dataset.max_length * 2, 
-                                            field_types=['cat']*7 + ['set'], separator=[1]*7 + [10],
+                                            field_types=self.dataset.field_types, separator=self.dataset.field_lengths,
                                              **self.model_param)
                             self.models.append(model)
                             tf.get_variable_scope().reuse_variables()
@@ -413,11 +413,12 @@ class Trainer:
         if not FLAGS.distributed:
             return tf.Session(config=self.gpu_config)
         else:
-            return tf.train.MonitoredTrainingSession(master=self.server.target, 
-                                                    is_chief=(FLAGS.task_index == 0),
-                                                    # TODO
-                                                    hooks=None,
-                                                    chief_only_hooks=None)
+            return tf.Session(self.server.target)
+            # return tf.train.MonitoredTrainingSession(master=self.server.target, 
+            #                                         is_chief=(FLAGS.task_index == 0),
+            #                                         # TODO
+            #                                         hooks=None,
+            #                                         chief_only_hooks=None)
 
     def get_nake_sess(self):
         sess = self.sess
@@ -461,13 +462,8 @@ class Trainer:
         return _loss_, _log_loss_, _l2_loss_
 
     def train(self):
-        # with self.sess_op() as self.sess:
-        with tf.Session(self.server.target) as self.sess:
-            if not FLAGS.distributed or FLAGS.task_index == 0:
-                self.sess.run([tf.global_variables_initializer(),
-                                tf.local_variables_initializer()])
-            elif FLAGS.lazy_update > 1:
-                self.sess.run(tf.variables_initializer(self.local_grads))
+        with self.sess_op() as self.sess:
+        # with tf.Session(self.server.target) as self.sess:
             self.train_gen = self.dataset.batch_generator(self.train_data_param)
             self.valid_gen = self.dataset.batch_generator(self.valid_data_param)
             self.test_gen = self.dataset.batch_generator(self.test_data_param)
@@ -493,7 +489,8 @@ class Trainer:
 
             if not FLAGS.distributed:
                 if not FLAGS.restore:
-                    self.sess.run(tf.global_variables_initializer())
+                    self.sess.run([tf.global_variables_initializer(),
+                                    tf.local_variables_initializer()])
                 else:
                     # TODO check restore
                     checkpoint_state = tf.train.get_checkpoint_state(self.ckpt_dir)
@@ -510,6 +507,12 @@ class Trainer:
                     print('Restore model from:', self.ckpt_dir)
                     print('Run initial evaluation...')
                     self.evaluate(self.test_gen, self.test_writer)
+                else:
+                    if FLAGS.task_index == 0:
+                        self.sess.run([tf.global_variables_initializer(),
+                                        tf.local_variables_initializer()])
+                    elif FLAGS.lazy_update > 1:
+                        self.sess.run(tf.variables_initializer(self.local_grads))
 
             # TODO: initial evaluation
             self.begin_step = self.global_step.eval(self.sess)
