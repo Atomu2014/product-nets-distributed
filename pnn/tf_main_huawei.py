@@ -49,9 +49,9 @@ tf.app.flags.DEFINE_float('learning_rate', 0.1, 'Learning rate')
 tf.app.flags.DEFINE_string('loss_mode', 'mean', 'Loss = mean, sum')
 
 tf.app.flags.DEFINE_integer('batch_size', 1000, 'Training batch size')
-tf.app.flags.DEFINE_integer('test_batch_size', 10240, 'Testing batch size')
+tf.app.flags.DEFINE_integer('test_batch_size', 10000, 'Testing batch size')
 tf.app.flags.DEFINE_string('dataset', 'huawei', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
-tf.app.flags.DEFINE_string('model', 'lr', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
+tf.app.flags.DEFINE_string('model', 'deepfm', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
 
 tf.app.flags.DEFINE_bool('input_norm', True, 'Input normalization')
 tf.app.flags.DEFINE_bool('init_sparse', True, 'Init sparse layer')
