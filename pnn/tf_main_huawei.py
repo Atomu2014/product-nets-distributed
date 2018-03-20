@@ -156,6 +156,7 @@ class Trainer:
             self.worker_num_gpus = [int(x) for x in FLAGS.worker_num_gpus.split(',')]            
             self.num_gpus = self.worker_num_gpus[FLAGS.task_index]
             self.total_num_gpus = sum(self.worker_num_gpus)
+        self.lazy_update = FLAGS.lazy_update
 
         self.train_data_param = {
             'gen_type': 'train',
@@ -282,7 +283,7 @@ class Trainer:
                 self.grads = self.opt.compute_gradients(self.model.loss)
         
         with tf.device(self.device_op(0, local=True)):    
-            if FLAGS.lazy_update > 1:
+            if self.lazy_update > 1:
                 local_grads = []
                 accumulate_op = []
                 reset_op = []
@@ -301,7 +302,7 @@ class Trainer:
                     local_grads.append((local_grad, v))
                     accumulate_op.append(accumulate_grad)
                     reset_op.append(reset_grad)
-            if FLAGS.lazy_update > 1:
+            if self.lazy_update > 1:
                 self.update_op = self.opt.apply_gradients(local_grads, global_step=self.global_step)
                 self.accumulate_op = tf.group(*accumulate_op)
                 self.reset_op = tf.group(*reset_op)
@@ -339,7 +340,7 @@ class Trainer:
         with tf.device(self.device_op(0, local=True)):
             print('###################################')
             average_grads = []
-            if FLAGS.lazy_update > 1:
+            if self.lazy_update > 1:
                 local_grads = []
                 accumulate_op = []
                 reset_op = []
@@ -361,7 +362,7 @@ class Trainer:
                 print(type(grad), grad_shape, type(v), v.shape)
                 average_grads.append(grad_and_var)
 
-                if FLAGS.lazy_update > 1:
+                if self.lazy_update > 1:
                     zero_grad = tf.zeros_like(v)
                     local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False, 
                                             name=v.name.split(':')[0] + '_local_grad',
@@ -378,7 +379,7 @@ class Trainer:
             print('###################################')
             # TODO test this
             # self.grad_op = tf.group([(x[0].op, x[1].op) for x in average_grads])
-            if FLAGS.lazy_update > 1:
+            if self.lazy_update > 1:
                 self.update_op = self.opt.apply_gradients(local_grads, global_step=self.global_step)
                 # self.grad_op = tf.group(average_grads)
                 # tf.ver < 1.5 need *inputs 
@@ -419,7 +420,7 @@ class Trainer:
 
     def train_batch(self, batch_xs, batch_ys):
         if self.num_gpus == 1:
-            train_op = self.train_op if FLAGS.lazy_update <= 1 else self.accumulate_op
+            train_op = self.train_op if self.lazy_update <= 1 else self.accumulate_op
             fetches = [train_op]
             train_feed = {}
             fetches += [self.model.loss, self.model.log_loss, self.model.l2_loss]
@@ -444,7 +445,7 @@ class Trainer:
                 if model.training is not None:
                     train_feed[model.training] = True
 
-            train_op = self.train_op if FLAGS.lazy_update <= 1 else self.accumulate_op
+            train_op = self.train_op if self.lazy_update <= 1 else self.accumulate_op
             ret = self.sess.run(fetches=[train_op] + fetches,
                                 feed_dict=train_feed, )
             _loss_ = np.mean([ret[i] for i in range(1, len(ret), 3)])
@@ -472,9 +473,10 @@ class Trainer:
                 self.train_size += len(_y)
                 self.num_steps += 1
             self.eval_steps = int(np.ceil(self.num_steps / FLAGS.eval_level)) if FLAGS.eval_level else 0
-               
-            print('Train size = %d, Batch size = %d, GPUs = %d / %d' %
-                  (self.train_size, FLAGS.batch_size, self.num_gpus, self.total_num_gpus))
+            self.lazy_update = min(self.lazy_update, self.num_steps)
+
+            print('Train size = %d, Batch size = %d, GPUs = %d / %d, Lazy update = %d steps' %
+                  (self.train_size, FLAGS.batch_size, self.num_gpus, self.total_num_gpus, self.lazy_update))
             print('%d rounds in total, One round = %d steps, One evaluation = %d steps' %
                   (FLAGS.num_rounds, self.num_steps, self.eval_steps))
 
@@ -503,7 +505,7 @@ class Trainer:
                     if FLAGS.task_index == 0:
                         self.sess.run([tf.global_variables_initializer(),
                                         tf.local_variables_initializer()])
-                    elif FLAGS.lazy_update > 1:
+                    elif self.lazy_update > 1:
                         self.sess.run(tf.variables_initializer(self.local_grads))
 
             # TODO: initial evaluation
@@ -522,8 +524,8 @@ class Trainer:
                     self.step = self.sess.run(self.global_step)
                     self.local_step += 1
 
-                    if FLAGS.lazy_update > 1:
-                        if self.local_step % FLAGS.lazy_update == 0:
+                    if self.lazy_update > 1:
+                        if self.local_step % self.lazy_update == 0:
                             self.sess.run(self.update_op)
                             self.sess.run(self.reset_op)
                             # elapsed_time = self.get_elapsed()
@@ -560,7 +562,7 @@ class Trainer:
                 if not FLAGS.distributed:# or FLAGS.task_index == 0:
                     self.saver.save(self.get_nake_sess(), os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
                     # TODO check evaluate if lazy_update > num_steps
-                    if FLAGS.eval_level == 0 or (FLAGS.lazy_update > 1):
+                    if FLAGS.eval_level == 0 or (self.lazy_update > 1):
                         self.evaluate(self.valid_gen, self.valid_writer)                    
             if FLAGS.distributed:
                 if FLAGS.task_index == 0:
