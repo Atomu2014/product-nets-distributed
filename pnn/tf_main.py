@@ -36,7 +36,7 @@ tf.app.flags.DEFINE_integer('num_shards', 1, 'Number of variable partitions')
 tf.app.flags.DEFINE_integer('num_gpus', 1, 'Number of variable partitions')
 tf.app.flags.DEFINE_bool('sparse_grad', False, 'Apply sparse gradient')
 
-tf.app.flags.DEFINE_string('logdir', '../log', 'Directory for storing mnist data')
+tf.app.flags.DEFINE_string('logdir', '../log', 'Directory for storing logs and models')
 tf.app.flags.DEFINE_string('tag', '', 'Tag for logdir')
 tf.app.flags.DEFINE_bool('restore', False, 'Restore from logdir')
 tf.app.flags.DEFINE_bool('val', False, 'If True, use validation set, else use test set')
