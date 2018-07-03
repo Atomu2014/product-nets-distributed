@@ -19,13 +19,10 @@ from print_hook import PrintHook
 from tf_models import as_model
 
 FLAGS = tf.app.flags.FLAGS
-tf.app.flags.DEFINE_integer('num_shards', 1, 'Number of variable partitions')
-
 tf.app.flags.DEFINE_string('logdir', '../log', 'Directory for storing logs and models')
 tf.app.flags.DEFINE_string('prefix', '', 'Prefix for logdir')
 tf.app.flags.DEFINE_bool('restore', False, 'Restore from logdir')
-tf.app.flags.DEFINE_bool('val', False, 'If True, the validation set will be used when printing logs, '
-                                       'else the test set will be used')
+tf.app.flags.DEFINE_bool('val', False, 'If True, use validation set, else use test set')
 tf.app.flags.DEFINE_float('val_ratio', 0., 'Validation ratio')
 
 tf.app.flags.DEFINE_string('optimizer', 'adagrad', 'Optimizer')
@@ -127,7 +124,7 @@ class Trainer:
         gpu_config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False,
                                     gpu_options={'allow_growth': True})
 
-        self.model_param = {'l2_embed': FLAGS.l2_embed, 'num_shards': FLAGS.num_shards, 'input_norm': FLAGS.input_norm,
+        self.model_param = {'l2_embed': FLAGS.l2_embed, 'input_norm': FLAGS.input_norm,
                             'init_sparse': FLAGS.init_sparse, 'init_fused': FLAGS.init_fused,
                             'loss_mode': FLAGS.loss_mode}
         if FLAGS.model != 'lr':

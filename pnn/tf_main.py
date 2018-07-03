@@ -3,6 +3,7 @@ from __future__ import print_function
 
 import json
 import os
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import sys
 import time
@@ -21,14 +22,14 @@ from tf_models import as_model
 
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('ps_hosts', '10.58.14.149:12345', 'Comma-separated list of hostname:port pairs')
-tf.app.flags.DEFINE_string('worker_hosts', '10.58.14.147:12346', #,10.58.14.150:12347',
+tf.app.flags.DEFINE_string('worker_hosts', '10.58.14.147:12346,10.58.14.150:12347',
                            'Comma-separated list of hostname:port pairs')
-tf.app.flags.DEFINE_string('worker_num_gpus', '4', 'Comma-separated list of integers')
+tf.app.flags.DEFINE_string('worker_num_gpus', '2,2', 'Comma-separated list of integers')
 tf.app.flags.DEFINE_string('job_name', '', 'One of ps, worker')
 tf.app.flags.DEFINE_integer('task_index', 0, 'Index of task within the job')
 tf.app.flags.DEFINE_integer('num_ps', 1, 'Number of ps')
-tf.app.flags.DEFINE_integer('num_workers', 1, 'Number of workers')
-tf.app.flags.DEFINE_bool('distributed', True, 'Distributed training using parameter servers')
+tf.app.flags.DEFINE_integer('num_workers', 2, 'Number of workers')
+tf.app.flags.DEFINE_bool('distributed', False, 'Distributed training using parameter servers')
 # tf.app.flags.DEFINE_bool('sync', False, 'Synchronized training')
 tf.app.flags.DEFINE_integer('lazy_update', 1, 'Number of local steps by which variable update is delayed')
 
@@ -50,16 +51,18 @@ tf.app.flags.DEFINE_string('loss_mode', 'mean', 'Loss = mean, sum')
 
 tf.app.flags.DEFINE_integer('batch_size', 1024, 'Training batch size')
 tf.app.flags.DEFINE_integer('test_batch_size', 10240, 'Testing batch size')
-tf.app.flags.DEFINE_string('dataset', 'avazu', 'Dataset = ipinyou, avazu, criteo, criteo_9d, criteo_16d"')
+tf.app.flags.DEFINE_string('dataset', 'avazu', 'Dataset = ipinyou, avazu, criteo, criteo_challenge')
 tf.app.flags.DEFINE_string('model', 'lr', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
 
 tf.app.flags.DEFINE_bool('input_norm', True, 'Input normalization')
 tf.app.flags.DEFINE_bool('init_sparse', True, 'Init sparse layer')
 tf.app.flags.DEFINE_bool('init_fused', False, 'Init fused layer')
 
-tf.app.flags.DEFINE_integer('embed_size', 64, 'Embedding size')
-tf.app.flags.DEFINE_string('nn_layers', '[' + '["full", 2048],  ["act", "relu"], '*5 + '["full", 1]]', 'Network structure')
-tf.app.flags.DEFINE_string('sub_nn_layers', '[["full", 60], ["ln", ""], ["act", "relu"], ["full", 5],  ["ln", ""]]', 'Sub-network structure')
+tf.app.flags.DEFINE_integer('embed_size', 20, 'Embedding size')
+tf.app.flags.DEFINE_string('nn_layers', '[' + '["full", 400],  ["act", "relu"], ' * 3 + '["full", 1]]',
+                           'Network structure')
+tf.app.flags.DEFINE_string('sub_nn_layers', '[["full", 20], ["ln", ""], ["act", "relu"], ["full", 1],  ["ln", ""]]',
+                           'Sub-network structure')
 tf.app.flags.DEFINE_float('l2_embed', 2e-5, 'L2 regularization')
 tf.app.flags.DEFINE_float('l2_kernel', 1e-5, 'L2 regularization for kernels')
 tf.app.flags.DEFINE_bool('wide', True, 'Wide term for pin')
@@ -74,6 +77,7 @@ tf.app.flags.DEFINE_float('decay', 1., 'Learning rate decay')
 tf.app.flags.DEFINE_integer('log_frequency', 1000, 'Logging frequency')
 
 
+# create log dir, e.g., ../log/data/model/timestamp/
 def get_logdir(FLAGS):
     if FLAGS.restore:
         logdir = FLAGS.logdir
@@ -86,6 +90,7 @@ def get_logdir(FLAGS):
     return logdir, logfile
 
 
+# redirect stdout to log file
 def redirect_stdout(logfile):
     def MyHookOut(text):
         logfile.write(text)
@@ -108,6 +113,7 @@ def get_optimizer(opt, lr):
         return tf.train.AdagradOptimizer(learning_rate=lr, initial_accumulator_value=init_val)
 
 
+# sparse_add when using multiple gpus
 def sparse_grads_mean(grads_and_vars):
     indices = []
     values = []
@@ -121,6 +127,7 @@ def sparse_grads_mean(grads_and_vars):
     return tf.IndexedSlices(values=values, indices=indices, dense_shape=dense_shape)
 
 
+# sync threads
 def create_done_queue(i):
     with tf.device('/job:ps/task:%d' % (i)):
         return tf.FIFOQueue(FLAGS.num_workers, tf.int32, shared_name='done_queue' + str(i))
@@ -141,6 +148,7 @@ def create_finish_queues():
 
 class Trainer:
     def __init__(self):
+        # parse params
         self.config = {}
         self.logdir, self.logfile = get_logdir(FLAGS=FLAGS)
         self.ckpt_dir = os.path.join(self.logdir, 'checkpoints')
@@ -153,7 +161,7 @@ class Trainer:
             self.num_gpus = FLAGS.num_gpus
             self.total_num_gpus = self.num_gpus
         else:
-            self.worker_num_gpus = [int(x) for x in FLAGS.worker_num_gpus.split(',')]            
+            self.worker_num_gpus = [int(x) for x in FLAGS.worker_num_gpus.split(',')]
             self.num_gpus = self.worker_num_gpus[FLAGS.task_index]
             self.total_num_gpus = sum(self.worker_num_gpus)
         self.lazy_update = FLAGS.lazy_update
@@ -185,7 +193,7 @@ class Trainer:
         self.valid_logdir = os.path.join(self.logdir, 'valid', self.worker_dir)
         self.test_logdir = os.path.join(self.logdir, 'test', self.worker_dir)
         self.gpu_config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False,
-                                    gpu_options={'allow_growth': True})
+                                         gpu_options={'allow_growth': True})
 
         self.model_param = {'l2_embed': FLAGS.l2_embed, 'num_shards': FLAGS.num_shards, 'input_norm': FLAGS.input_norm,
                             'init_sparse': FLAGS.init_sparse, 'init_fused': FLAGS.init_fused,
@@ -240,7 +248,7 @@ class Trainer:
         self.worker_hosts = FLAGS.worker_hosts.split(',')
         self.cluster = tf.train.ClusterSpec({'ps': self.ps_hosts, 'worker': self.worker_hosts})
         self.server = tf.train.Server(self.cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index,
-                                    config=self.gpu_config)
+                                      config=self.gpu_config)
 
     def start_ps(self):
         print(self.server.target)
@@ -280,8 +288,8 @@ class Trainer:
                                       **self.model_param)
                 tf.get_variable_scope().reuse_variables()
                 self.grads = self.opt.compute_gradients(self.model.loss)
-        
-        with tf.device(self.device_op(0, local=True)):    
+
+        with tf.device(self.device_op(0, local=True)):
             if self.lazy_update > 1:
                 local_grads = []
                 accumulate_op = []
@@ -290,8 +298,8 @@ class Trainer:
                 for grad, v in self.grads:
                     zero_grad = tf.zeros_like(v)
                     local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False,
-                                            name=v.name.split(':')[0] + '_local_grad',
-                                            collections=[tf.GraphKeys.LOCAL_VARIABLES])
+                                             name=v.name.split(':')[0] + '_local_grad',
+                                             collections=[tf.GraphKeys.LOCAL_VARIABLES])
                     self.local_grads.append(local_grad)
                     reset_grad = local_grad.assign(zero_grad)
                     if FLAGS.sparse_grad and isinstance(grad, tf.IndexedSlices):
@@ -318,10 +326,10 @@ class Trainer:
         with tf.device(self.device_op(0)):
             with tf.variable_scope(tf.get_variable_scope()):
                 self.global_step = tf.get_variable(name='global_step', dtype=tf.int32, shape=[],
-                                                    initializer=tf.constant_initializer(0), trainable=False)
+                                                   initializer=tf.constant_initializer(0), trainable=False)
                 self.learning_rate = tf.get_variable(name='learning_rate', dtype=tf.float32, shape=[],
-                                                    initializer=tf.constant_initializer(FLAGS.learning_rate),
-                                                    trainable=False)
+                                                     initializer=tf.constant_initializer(FLAGS.learning_rate),
+                                                     trainable=False)
                 self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate)
                 for i in xrange(self.num_gpus):
                     with tf.device(self.device_op(i)):
@@ -362,10 +370,10 @@ class Trainer:
 
                 if self.lazy_update > 1:
                     zero_grad = tf.zeros_like(v)
-                    local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False, 
-                                            name=v.name.split(':')[0] + '_local_grad',
-                                            collections=[tf.GraphKeys.LOCAL_VARIABLES])
-                    self.local_grads.append(local_grad)                    
+                    local_grad = tf.Variable(zero_grad, dtype=tf.float32, trainable=False,
+                                             name=v.name.split(':')[0] + '_local_grad',
+                                             collections=[tf.GraphKeys.LOCAL_VARIABLES])
+                    self.local_grads.append(local_grad)
                     reset_grad = local_grad.assign(zero_grad)
                     if FLAGS.sparse_grad and isinstance(grad, tf.IndexedSlices):
                         accumulate_grad = local_grad.scatter_sub(-grad)
@@ -453,10 +461,10 @@ class Trainer:
 
     def train(self):
         with self.sess_op() as self.sess:
-        # with tf.Session(self.server.target) as self.sess:
+            # with tf.Session(self.server.target) as self.sess:
             if not FLAGS.distributed or FLAGS.task_index == 0:
                 self.sess.run([tf.global_variables_initializer(),
-                                tf.local_variables_initializer()])
+                               tf.local_variables_initializer()])
             elif FLAGS.lazy_update > 1:
                 self.sess.run(tf.variables_initializer(self.local_grads))
             self.train_gen = self.dataset.batch_generator(self.train_data_param)
@@ -486,7 +494,7 @@ class Trainer:
             if not FLAGS.distributed:
                 if not FLAGS.restore:
                     self.sess.run([tf.global_variables_initializer(),
-                                    tf.local_variables_initializer()])
+                                   tf.local_variables_initializer()])
                 else:
                     # TODO check restore
                     checkpoint_state = tf.train.get_checkpoint_state(self.ckpt_dir)
@@ -507,7 +515,7 @@ class Trainer:
                 else:
                     if FLAGS.task_index == 0:
                         self.sess.run([tf.global_variables_initializer(),
-                                        tf.local_variables_initializer()])
+                                       tf.local_variables_initializer()])
                     elif self.lazy_update > 1:
                         self.sess.run(tf.variables_initializer(self.local_grads))
 
@@ -537,13 +545,14 @@ class Trainer:
                         if self.local_step % FLAGS.log_frequency == 0:
                             self.step = self.sess.run(self.global_step)
                             elapsed_time = self.get_elapsed()
-                            print('Local step: %d, Global step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
+                            print(
+                                'Local step: %d, Global step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
                                 % (self.local_step, self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
                     else:
                         if self.step % FLAGS.log_frequency == 0:
                             elapsed_time = self.get_elapsed()
                             print('Done step %d, Elapsed: %.2fs, Train-Loss: %.6f, Log-Loss: %.6f, L2-Loss: %g'
-                                % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
+                                  % (self.step, elapsed_time, _loss_, _log_loss_, _l2_loss_))
                             summary = tf.Summary(value=[tf.Summary.Value(tag='loss', simple_value=_loss_),
                                                         tf.Summary.Value(tag='log_loss', simple_value=_log_loss_),
                                                         tf.Summary.Value(tag='l2_loss', simple_value=_l2_loss_)])
@@ -554,22 +563,23 @@ class Trainer:
                             eta = FLAGS.num_rounds * self.num_steps / (self.step - self.begin_step) * elapsed_time
                             eval_times = self.step % self.num_steps // self.eval_steps or FLAGS.eval_level
                             print('Round: %d, Eval: %d / %d, AvgTime: %.2fms, Elapsed: %.2fs, ETA: %s' %
-                                (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / self.step),
-                                elapsed_time, self.get_timedelta(eta=eta)))
-                            if not FLAGS.distributed:# or FLAGS.task_index == 0:
+                                  (r, eval_times, FLAGS.eval_level, float(elapsed_time * 1000 / self.step),
+                                   elapsed_time, self.get_timedelta(eta=eta)))
+                            if not FLAGS.distributed:  # or FLAGS.task_index == 0:
                                 self.evaluate(self.valid_gen, self.valid_writer)
                                 # TODO implement decay
                                 # self.learning_rate.assign(self.learning_rate * FLAGS.decay)
 
                 print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
-                if not FLAGS.distributed:# or FLAGS.task_index == 0:
-                    self.saver.save(self.get_nake_sess(), os.path.join(self.logdir, 'checkpoints', 'model.ckpt'), self.step)
+                if not FLAGS.distributed:  # or FLAGS.task_index == 0:
+                    self.saver.save(self.get_nake_sess(), os.path.join(self.logdir, 'checkpoints', 'model.ckpt'),
+                                    self.step)
                     # TODO check evaluate if lazy_update > num_steps
                     if FLAGS.eval_level == 0 or (self.lazy_update > 1):
-                        self.evaluate(self.valid_gen, self.valid_writer)                    
+                        self.evaluate(self.valid_gen, self.valid_writer)
             if FLAGS.distributed:
                 if FLAGS.task_index == 0:
-                    self.evaluate(self.test_gen, self.test_writer)                                    
+                    self.evaluate(self.test_gen, self.test_writer)
                 self.stop_worker()
 
     def stop_worker(self):
@@ -625,7 +635,8 @@ class Trainer:
         print('%d samples are evaluated' % len(labels))
         if _min_ + _max_ > 0:
             print('EPS: %g, %d (%.2f) < eps, %d (%.2f) > 1-eps, %d (%.2f) are truncated' %
-                (eps, _min_, _min_ / len(preds), _max_, _max_ / len(preds), _min_ + _max_, (_min_ + _max_) / len(preds)))
+                  (eps, _min_, _min_ / len(preds), _max_, _max_ / len(preds), _min_ + _max_,
+                   (_min_ + _max_) / len(preds)))
         preds[preds < eps] = eps
         preds[preds > 1 - eps] = 1 - eps
         if not submission:
