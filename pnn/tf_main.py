@@ -49,8 +49,8 @@ tf.app.flags.DEFINE_float('init_val', 0.1, 'Initial accumulator value for adagra
 tf.app.flags.DEFINE_float('learning_rate', 0.1, 'Learning rate')
 tf.app.flags.DEFINE_string('loss_mode', 'mean', 'Loss = mean, sum')
 
-tf.app.flags.DEFINE_integer('batch_size', 1024, 'Training batch size')
-tf.app.flags.DEFINE_integer('test_batch_size', 10240, 'Testing batch size')
+tf.app.flags.DEFINE_integer('batch_size', 2000, 'Training batch size')
+tf.app.flags.DEFINE_integer('test_batch_size', 10040, 'Testing batch size')
 tf.app.flags.DEFINE_string('dataset', 'avazu', 'Dataset = ipinyou, avazu, criteo, criteo_challenge')
 tf.app.flags.DEFINE_string('model', 'lr', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
 
