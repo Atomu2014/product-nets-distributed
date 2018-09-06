@@ -54,9 +54,9 @@ tf.app.flags.DEFINE_integer('test_batch_size', 10040, 'Testing batch size')
 tf.app.flags.DEFINE_string('dataset', 'avazu', 'Dataset = ipinyou, avazu, criteo, criteo_challenge')
 tf.app.flags.DEFINE_string('model', 'lr', 'Model type = lr, fm, ffm, kfm, nfm, fnn, ccpm, deepfm, ipnn, kpnn, pin')
 
-tf.app.flags.DEFINE_bool('input_norm', True, 'Input normalization')
-tf.app.flags.DEFINE_bool('init_sparse', True, 'Init sparse layer')
-tf.app.flags.DEFINE_bool('init_fused', False, 'Init fused layer')
+tf.app.flags.DEFINE_bool('input_norm', False, 'If true, the input will be normalized (set l2_norm to 1); else, do nothing')
+tf.app.flags.DEFINE_bool('init_sparse', False, 'If true, embedding layer ~ uniform(0, sqrt(k)); else, embedding layer ~ xavier')
+tf.app.flags.DEFINE_bool('init_fused', False, 'If true, sub-net weights ~ xavier([num_sub_net, in_node, out_node]); else xavier([in_node, out_node])')
 
 tf.app.flags.DEFINE_integer('embed_size', 20, 'Embedding size')
 tf.app.flags.DEFINE_string('nn_layers', '[' + '["full", 400],  ["act", "relu"], ' * 3 + '["full", 1]]',
