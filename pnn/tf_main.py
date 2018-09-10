@@ -282,6 +282,7 @@ class Trainer:
                                                      initializer=tf.constant_initializer(
                                                          FLAGS.learning_rate),
                                                      trainable=False)
+                # self.lr_decay_op = tf.assign(self.learning_rate, self.learning_rate * FLAGS.decay)
                 self.opt = get_optimizer(FLAGS.optimizer, self.learning_rate)
                 self.model = as_model(FLAGS.model, input_dim=self.dataset.num_features,
                                       num_fields=self.dataset.num_fields,
@@ -569,6 +570,7 @@ class Trainer:
                                 self.evaluate(self.valid_gen, self.valid_writer)
                                 # TODO implement decay
                                 # self.learning_rate.assign(self.learning_rate * FLAGS.decay)
+                                # self.sess.run(self.lr_decay_op)
 
                 print('Round %d finished, Elapsed: %s' % (r, self.get_timedelta()))
                 if not FLAGS.distributed:  # or FLAGS.task_index == 0:
