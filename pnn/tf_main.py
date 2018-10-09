@@ -458,6 +458,7 @@ class Trainer:
             _loss_ = np.mean([ret[i] for i in range(1, len(ret), 3)])
             _log_loss_ = np.mean([ret[i] for i in range(2, len(ret), 3)])
             _l2_loss_ = np.mean([ret[i] for i in range(3, len(ret), 3)])
+        del train_feed
         return _loss_, _log_loss_, _l2_loss_
 
     def train(self):
@@ -619,6 +620,7 @@ class Trainer:
                     feed_dict[model.training] = False
             _preds_ = self.sess.run(fetches=fetches, feed_dict=feed_dict)
             batch_preds = [x.flatten() for x in _preds_]
+        del feed_dict
         return batch_preds
 
     def evaluate(self, gen, writer=None, eps=1e-6, submission=0):
