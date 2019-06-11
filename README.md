@@ -83,6 +83,8 @@ KFM achieves 0.44484/0.44492 on the private/public leaderboard, and achieves 0.4
 
 ## Interesting Discussions
 
+``Note``: some basic problems are discussed in the short [demo](https://github.com/Atomu2014/product-nets), while more advanced problems are discussed here because they are more relavant to this extended work.
+
 ### Overfitting of Adam
 
 I our experiments, we found adam makes the models converge much faster than other optimizers. However, these models would overfit severely in 1-2 epochs, including shallow models (e.g. FM) and deep models.
@@ -94,3 +96,20 @@ I believe the overfitting of adam starts from the embedding vectors, i.e., the e
 Another solution is regularization. In paper 4.4, we empirically discussed several popular regularization methods. In addition, I discussed those methods with other teams working on this direction through email. The most effective regularization would be ``weight decay`` and ``learning rate schedule``. Many proofs can been found, including the paper [Fixing weight decay regularization in Adam](https://openreview.net/forum?id=rk6qdGgCZ), the performance of adagrad (adagrad naturally decays learning rates during training), and some practices in other tasks (e.g., the training code of Bert by google and GPT by openai).
 
 The last question is why overfitting in recommendation/CTR prediction. A possible reason is the distribution shift between train test sets is much severe in high-dimensional sparse scenarios.
+
+### Performance Gain of Deep Models
+
+Even though more and more complicated deep models are proposed for such high-dimensional sparse data, deeper networks can hardly outperform shallower networks significantly. In another word, the performance gain is less and less when networks grow deeper and deeper.
+
+An assumption is, DNN has much lower sampling complexity than shallow models, yet its approximation ability is not significantly better.
+
+A detailed discussion of sampling complexity on sparse data can be found at [The Sample Complexity of Online One-Class Collaborative Filtering](https://arxiv.org/abs/1706.00061). This paper proposes, there is a lower bound for a specific sparse feature such that CF model can learn this feature very well when sufficient samples are trained. In another word, a good model only requires a certain amount of samples (of a feature). Even though this paper only discusses one-class CF models, if we suppose the conclusion also applies to DNNs, we can explain some experiment results of DNNs.
+
+- DNNs usually perform much better in cold-start problems. However, when we downsample the dataset and filter out low-frequency features, the performance gain of DNNs usually drops. 
+- Increasing the depth of DNNs does not significant improve the performance. 
+
+If we assume 1. DNNs require less samples then shallow models to achieve the same performance, 2. DNNs do not significantly outperform shallow models when sufficient samples (much more than the sampling complixity of shallow models) are provided, the above results can be easily explained.
+
+The 2nd assumption relies on the approximation ability of DNNs, which has been discussed in the paper 3.2 and 5.4. And we draw the conclusion, "ideal" dataset is unfair for DNNs, and "downsample" may be harmful to compare the learning ability of shallow and deep models. Instead of increasing the capacity of DNNs and propose more and more complicated models, we should focus more on cold-start problems, which is a bigger and more important challenge in high-dimensional sparse data. Also, extending the sampling complexity theory to DNNs would also be interesting!
+
+Besides, some recent advances in learning combinatorial features with DNNs are also intersting and are worth following.
