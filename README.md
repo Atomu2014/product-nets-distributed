@@ -1,3 +1,5 @@
+``Note``: I collect some interesting discusions from emails and put then behind.
+
 ``Note``: Any problems, you can contact me at [kevinqu@apex.sjtu.edu.cn](kevinqu@apex.sjtu.edu.cn),
 or [kevinqu16@gmail.com](kevinqu16@gmail.com).
 Through email, you will get my rapid response.
@@ -77,3 +79,18 @@ Distributed training:
 ``criteo_challenge.py`` contains our solution to the contest.
 In this contest, [libFFM](https://github.com/guestwalk/kaggle-2014-criteo) (master branch) was the winning solution with log loss = 0.44506/0.44520 on the private/public leaderboard, and achieves 0.44493/0.44508 after calibration. We train KFM with the same training files as libFFM on one 1080Ti.
 KFM achieves 0.44484/0.44492 on the private/public leaderboard, and achieves 0.44484/0.44491 after calibration.
+
+
+## Interesting Discussions
+
+### Overfitting of Adam
+
+I our experiments, we found adam makes the models converge much faster than other optimizers. However, these models would overfit severely in 1-2 epochs, including shallow models (e.g. FM) and deep models.
+
+The first solution is by choosing different optimizers. We find adagrad is more robust when learning rate and L2 regularization are set properly, and is not overfitting after 30+ epochs. However, the performance of adagrad on test set is no better than adam. Thus there is a trade-off between robustness and performance. For some enviroments requiring high robustness (e.g., online experiments), adagrad may be a better choice.
+
+I believe the overfitting of adam starts from the embedding vectors, i.e., the embedding vectors are more likely to overfit. And I notice the variance of embedding vectors grows steadily when using adam even with large L2 penalty. An assumption about the gradients of adam has been discussed in the paper 4.3.
+
+Another solution is regularization. In paper 4.4, we empirically discussed several popular regularization methods. In addition, I discussed those methods with other teams working on this direction through email. The most effective regularization would be ``weight decay`` and ``learning rate schedule``. Many proofs can been found, including the paper [Fixing weight decay regularization in Adam](https://openreview.net/forum?id=rk6qdGgCZ), the performance of adagrad (adagrad naturally decays learning rates during training), and some practices in other tasks (e.g., the training code of Bert by google and GPT by openai).
+
+The last question is why overfitting in recommendation/CTR prediction. A possible reason is the distribution shift between train test sets is much severe in high-dimensional sparse scenarios.
