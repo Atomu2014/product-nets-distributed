@@ -1,7 +1,6 @@
 ``Note``: I collect some interesting discusions from emails and put then behind.
 
-``Note``: Any problems, you can contact me at [kevinqu@apex.sjtu.edu.cn](kevinqu@apex.sjtu.edu.cn),
-or [kevinqu16@gmail.com](kevinqu16@gmail.com).
+``Note``: Any problems, you can contact me at [kevinqu16@gmail.com](kevinqu16@gmail.com).
 Through email, you will get my rapid response.
 
 This repository provides the experiments code of the paper [Product-based Neural Networks for
